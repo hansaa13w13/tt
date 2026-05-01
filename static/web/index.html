@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hisse Plus Terminal</title>
+<link rel="stylesheet" href="/static/web/app.css">
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">▲</span>
+      <span class="brand-name">HISSE<b>PLUS</b></span>
+      <span class="brand-tag">terminal</span>
+    </div>
+    <nav class="nav">
+      <a class="nav-item" data-route="dashboard"><span class="ic">◧</span>Genel</a>
+      <a class="nav-item" data-route="watchlist"><span class="ic">★</span>İzlem</a>
+      <a class="nav-item" data-route="markets"><span class="ic">▤</span>Piyasalar</a>
+      <a class="nav-item" data-route="screener"><span class="ic">⌕</span>Tarama</a>
+      <a class="nav-item" data-route="akd"><span class="ic">⇄</span>AKD</a>
+      <a class="nav-item" data-route="alarms"><span class="ic">◉</span>Alarmlar</a>
+      <a class="nav-item" data-route="settings"><span class="ic">⚙</span>Ayarlar</a>
+    </nav>
+    <div class="side-foot">
+      <div class="status-line"><span class="dot" id="conn-dot"></span><span id="conn-text">bağlanıyor…</span></div>
+      <div class="status-line muted" id="user-line">—</div>
+    </div>
+  </aside>
+
+  <header class="topbar">
+    <div class="search-wrap">
+      <input id="global-search" type="text" placeholder="Sembol ara… (örn. THYAO)" autocomplete="off">
+      <div id="search-results" class="search-results hidden"></div>
+    </div>
+    <div class="top-meta">
+      <div class="ticker-strip" id="ticker-strip"></div>
+      <button class="icon-btn" id="btn-refresh" title="Yenile">↻</button>
+      <a class="icon-btn" href="/admin/telegram" target="_blank" title="Telegram Yönetimi">📡</a>
+    </div>
+  </header>
+
+  <main class="content" id="content">
+    <div class="loading">Yükleniyor…</div>
+  </main>
+</div>
+
+<script src="/static/web/app.js"></script>
+</body>
+</html>

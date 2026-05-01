@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Telegram Oturum Yönetimi — Hisse Plus Proxy</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f1419; color: #e6edf3; line-height: 1.5;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  h2 { font-size: 16px; margin: 24px 0 8px; color: #7ee787; }
+  .muted { color: #8b949e; font-size: 13px; }
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+    padding: 18px; margin-bottom: 16px;
+  }
+  label { display: block; font-size: 13px; color: #8b949e; margin: 12px 0 4px; }
+  input[type=text], input[type=password], input[type=tel] {
+    width: 100%; padding: 10px 12px;
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+    color: #e6edf3; font-size: 14px; font-family: inherit;
+  }
+  input:focus { outline: none; border-color: #58a6ff; }
+  button {
+    background: #238636; border: 1px solid #2ea043; color: #fff;
+    padding: 10px 18px; border-radius: 6px; font-size: 14px; font-weight: 600;
+    cursor: pointer; margin-top: 12px;
+  }
+  button:hover { background: #2ea043; }
+  button.secondary { background: #21262d; border-color: #30363d; }
+  button.secondary:hover { background: #30363d; }
+  button.danger { background: #da3633; border-color: #f85149; }
+  button.danger:hover { background: #f85149; }
+  button[disabled] { opacity: 0.5; cursor: not-allowed; }
+  .row { display: flex; gap: 12px; }
+  .row > * { flex: 1; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 12px;
+    font-size: 12px; font-weight: 600;
+  }
+  .ok { background: #1f6f3a; color: #d2f5dc; }
+  .warn { background: #845c00; color: #fff7d6; }
+  .err { background: #6e1419; color: #ffd6d4; }
+  .log {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+    padding: 10px; font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 12px; color: #c9d1d9; white-space: pre-wrap; word-break: break-word;
+    margin-top: 12px; max-height: 200px; overflow-y: auto;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 6px 0; }
+  td:first-child { color: #8b949e; width: 180px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📡 Telegram Oturum Yönetimi</h1>
+  <p class="muted">
+    Hesabınızla giriş yaparak <b>init_data</b>'nın otomatik yenilenmesini sağlar.
+    Oturum bilgisi sadece bu sunucuda saklanır.
+  </p>
+
+  <div class="card">
+    <h2 style="margin-top:0">Durum</h2>
+    <table id="status-table">
+      <tr><td>Yükleniyor…</td><td></td></tr>
+    </table>
+    <div style="margin-top: 12px;">
+      <button id="btn-refresh-status" class="secondary">Durumu Yenile</button>
+      <button id="btn-refresh-init">init_data'yı Şimdi Yenile</button>
+      <button id="btn-logout" class="danger">Oturumu Kapat</button>
+    </div>
+  </div>
+
+  <div class="card" id="login-card">
+    <h2 style="margin-top:0">1) Telegram Hesabıyla Giriş</h2>
+    <p class="muted">
+      Telefonu uluslararası formatla yazın (örn. <code>+905xxxxxxxxx</code>).
+      Telegram, hesabınıza bir kod gönderecek.
+    </p>
+    <label>Telefon Numarası</label>
+    <input type="tel" id="phone" placeholder="+905xxxxxxxxx" autocomplete="off">
+    <button id="btn-send-code">Kod Gönder</button>
+
+    <div id="code-block" class="hidden">
+      <label>Telegram'dan Gelen Kod</label>
+      <input type="text" id="code" placeholder="12345" autocomplete="off" inputmode="numeric">
+      <label id="pwd-label" class="hidden">İki Aşamalı Doğrulama Şifresi</label>
+      <input type="password" id="password" class="hidden" placeholder="2FA şifreniz" autocomplete="off">
+      <button id="btn-verify">Doğrula ve Giriş Yap</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">2) Mini App Bilgileri</h2>
+    <p class="muted">
+      Init_data'yı çekeceğimiz bot ve mini uygulamayı belirtin.
+    </p>
+    <label>Bot Kullanıcı Adı (örn. <code>HissePlusBot</code>)</label>
+    <input type="text" id="bot-username" placeholder="HissePlusBot" autocomplete="off">
+    <div class="row">
+      <div>
+        <label>App Kısa Adı (opsiyonel, örn. <code>app</code>)</label>
+        <input type="text" id="app-short-name" placeholder="app" autocomplete="off">
+      </div>
+      <div>
+        <label>Start Parametresi (opsiyonel)</label>
+        <input type="text" id="start-param" placeholder="" autocomplete="off">
+      </div>
+    </div>
+    <button id="btn-save-config" class="secondary">Bilgileri Kaydet</button>
+  </div>
+
+  <div id="log" class="log"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const log = (msg, kind) => {
+  const el = $('log');
+  const stamp = new Date().toLocaleTimeString('tr-TR');
+  const prefix = kind === 'err' ? '❌' : kind === 'ok' ? '✅' : '•';
+  el.textContent = `[${stamp}] ${prefix} ${msg}\n` + el.textContent;
+};
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    method: opts.method || 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  return res.json().catch(() => ({}));
+}
+
+function badge(text, cls) {
+  return `<span class="badge ${cls}">${text}</span>`;
+}
+
+async function loadStatus() {
+  const s = await api('/api/v1/telegram/status');
+  const rows = [];
+  rows.push(['Telegram Oturumu', s.logged_in
+      ? badge('Açık', 'ok')
+      : (s.pending_login ? badge('Bekliyor: ' + s.pending_phone, 'warn') : badge('Kapalı', 'err'))]);
+  rows.push(['Bot', s.bot_username
+      ? `@${s.bot_username}` + (s.app_short_name ? ` / app: <code>${s.app_short_name}</code>` : '')
+      : badge('Tanımlı değil', 'warn')]);
+  rows.push(['init_data Yaşı', s.init_age_hours == null
+      ? badge('Yok', 'err')
+      : (s.init_expired ? badge(s.init_age_hours + ' saat — DOLMUŞ', 'err')
+                       : badge(s.init_age_hours + ' saat', 'ok'))]);
+  if (s.last_refresh_ts) {
+    const d = new Date(s.last_refresh_ts * 1000).toLocaleString('tr-TR');
+    rows.push(['Son Otomatik Yenileme', d]);
+  }
+  if (s.last_refresh_error) {
+    rows.push(['Son Hata', badge(s.last_refresh_error, 'err')]);
+  }
+  $('status-table').innerHTML = rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('');
+
+  if (s.bot_username) $('bot-username').value = s.bot_username;
+  if (s.app_short_name) $('app-short-name').value = s.app_short_name;
+  if (s.start_param) $('start-param').value = s.start_param;
+
+  if (s.pending_login) {
+    $('phone').value = s.pending_phone || '';
+    $('code-block').classList.remove('hidden');
+    if (s.needs_password) {
+      $('pwd-label').classList.remove('hidden');
+      $('password').classList.remove('hidden');
+    }
+  }
+}
+
+$('btn-refresh-status').onclick = loadStatus;
+
+$('btn-send-code').onclick = async () => {
+  const phone = $('phone').value.trim();
+  if (!phone) { log('Telefon boş', 'err'); return; }
+  $('btn-send-code').disabled = true;
+  log('Kod gönderiliyor: ' + phone);
+  const r = await api('/api/v1/telegram/send_code', { method: 'POST', body: { phone } });
+  $('btn-send-code').disabled = false;
+  if (r.ok) {
+    log('Kod gönderildi. Telegram uygulamasını kontrol edin.', 'ok');
+    $('code-block').classList.remove('hidden');
+  } else {
+    log('Kod gönderme başarısız: ' + (r.reason || 'bilinmeyen') +
+        (r.detail ? ' — ' + r.detail : '') +
+        (r.seconds ? ` (${r.seconds}s bekleyin)` : ''), 'err');
+  }
+  loadStatus();
+};
+
+$('btn-verify').onclick = async () => {
+  const code = $('code').value.trim();
+  const password = $('password').value;
+  $('btn-verify').disabled = true;
+  log('Doğrulanıyor…');
+  const r = await api('/api/v1/telegram/verify_code', {
+    method: 'POST', body: { code, password },
+  });
+  $('btn-verify').disabled = false;
+  if (r.ok) {
+    log('Giriş başarılı: ' + (r.user?.username ? '@' + r.user.username : (r.user?.first_name || '')), 'ok');
+    $('code').value = '';
+    $('password').value = '';
+  } else if (r.reason === 'password_required') {
+    log('İki aşamalı doğrulama şifresi gerekli', 'warn');
+    $('pwd-label').classList.remove('hidden');
+    $('password').classList.remove('hidden');
+  } else {
+    log('Doğrulama başarısız: ' + (r.reason || 'bilinmeyen') +
+        (r.detail ? ' — ' + r.detail : ''), 'err');
+  }
+  loadStatus();
+};
+
+$('btn-save-config').onclick = async () => {
+  const body = {
+    bot_username: $('bot-username').value.trim().replace(/^@/, ''),
+    app_short_name: $('app-short-name').value.trim(),
+    start_param: $('start-param').value.trim(),
+  };
+  const r = await api('/api/v1/telegram/config', { method: 'POST', body });
+  if (r.ok) log('Bilgiler kaydedildi', 'ok');
+  else log('Kayıt başarısız: ' + (r.reason || ''), 'err');
+  loadStatus();
+};
+
+$('btn-refresh-init').onclick = async () => {
+  $('btn-refresh-init').disabled = true;
+  log('init_data yenileniyor…');
+  const r = await api('/api/v1/telegram/refresh', { method: 'POST' });
+  $('btn-refresh-init').disabled = false;
+  if (r.ok) {
+    log('init_data yenilendi (auth_date=' + r.auth_date + ')', 'ok');
+  } else {
+    log('Yenileme başarısız: ' + (r.reason || '') + (r.detail ? ' — ' + r.detail : ''), 'err');
+  }
+  loadStatus();
+};
+
+$('btn-logout').onclick = async () => {
+  if (!confirm('Telegram oturumu kapatılsın mı?')) return;
+  const r = await api('/api/v1/telegram/logout', { method: 'POST' });
+  log(r.ok ? 'Oturum kapatıldı' : 'Hata', r.ok ? 'ok' : 'err');
+  loadStatus();
+};
+
+loadStatus();
+setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>
