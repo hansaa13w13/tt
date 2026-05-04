@@ -21,6 +21,7 @@ const state = {
   pollers: [],
   cache: { detail: {}, akd: {}, ohlcv: {}, technical: {}, takas: {} },
 };
+window._appState = state;  // global ref so inner closures can reach it past shadowing
 
 /* ───────────── Utils ───────────── */
 const $ = (s, r=document) => r.querySelector(s);
@@ -141,10 +142,15 @@ function render() {
     case "watchlist": return renderWatchlist(el);
     case "markets":   return renderMarkets(el);
     case "screener":  return renderScreener(el);
-    case "akd":       return renderAkd(el);
-    case "alarms":    return renderAlarms(el);
-    case "settings":  return renderSettings(el);
-    case "symbol":    return renderSymbol(el, state.routeParam);
+    case "akd":         return renderAkd(el);
+    case "kurumsal":    return renderKurumsal(el);
+    case "takasanaliz": return renderTakasAnaliz(el);
+    case "kappay":      return renderKapPay(el);
+    case "alarms":      return renderAlarms(el);
+    case "portfolio":   return renderPortfolio(el);
+    case "compare":     return renderCompare(el);
+    case "settings":    return renderSettings(el);
+    case "symbol":      return renderSymbol(el, state.routeParam);
     default: el.innerHTML = `<div class="error-box">Bilinmeyen sayfa: ${escapeHtml(state.route)}</div>`;
   }
 }
@@ -158,19 +164,19 @@ async function renderDashboard(el) {
     <div style="height:14px"></div>
     <div class="grid g-2">
       <div class="panel" id="dash-yuk">
-        <div class="panel-head"><div class="panel-title">Yükselenler</div></div>
-        <div id="dash-yuk-body" class="loading">…</div>
+        <div class="panel-head"><div class="panel-title">Yükselenler <span id="dash-yuk-cnt" class="muted" style="font-size:11px;font-weight:400"></span></div></div>
+        <div id="dash-yuk-body" class="loading" style="max-height:520px;overflow-y:auto">…</div>
       </div>
       <div class="panel" id="dash-dus">
-        <div class="panel-head"><div class="panel-title">Düşenler</div></div>
-        <div id="dash-dus-body" class="loading">…</div>
+        <div class="panel-head"><div class="panel-title">Düşenler <span id="dash-dus-cnt" class="muted" style="font-size:11px;font-weight:400"></span></div></div>
+        <div id="dash-dus-body" class="loading" style="max-height:520px;overflow-y:auto">…</div>
       </div>
     </div>
     <div style="height:14px"></div>
     <div class="grid g-2">
       <div class="panel" id="dash-hac">
-        <div class="panel-head"><div class="panel-title">Hacim Liderleri</div></div>
-        <div id="dash-hac-body" class="loading">…</div>
+        <div class="panel-head"><div class="panel-title">Hacim Liderleri <span id="dash-hac-cnt" class="muted" style="font-size:11px;font-weight:400"></span></div></div>
+        <div id="dash-hac-body" class="loading" style="max-height:400px;overflow-y:auto">…</div>
       </div>
       <div class="panel" id="dash-watch">
         <div class="panel-head">
@@ -182,6 +188,7 @@ async function renderDashboard(el) {
     </div>
   `;
 
+  /* Phase 1: KPIs + Hacim + Watchlist (fast) */
   async function refresh() {
     try {
       const wlPre = (state.watchlist || []).slice(0, 8);
@@ -192,10 +199,11 @@ async function renderDashboard(el) {
           ? API(`/api/v1/fiyatlar?semboller=${wlPre.join(",")}&user_id=${USER_ID}`).catch(() => null)
           : Promise.resolve(null),
       ]);
+      const dashKpis = $("#dash-kpis");
+      if (!dashKpis) return;
       state.marketSummary = piyasa;
       state.indices = indices?.endeksler || [];
 
-      // KPIs (3 endeks + işlem hacmi toplamı)
       const kpis = [];
       (state.indices || []).slice(0, 3).forEach(ix => {
         kpis.push({
@@ -204,44 +212,69 @@ async function renderDashboard(el) {
           sub: `<span class="${colorClass(ix.change)} arrow">${arrowFor(ix.change)}</span><span class="${colorClass(ix.change)}">${fmtPct(ix.change)}</span>`,
         });
       });
-      // 4. KPI: yukselenler/düşenler oran
-      const upN = (piyasa?.yukselenler || []).length;
-      const dnN = (piyasa?.dusenler || []).length;
+      const upN = piyasa?.yukselen_sayi ?? (piyasa?.yukselenler || []).length;
+      const dnN = piyasa?.dusen_sayi   ?? (piyasa?.dusenler   || []).length;
+      const flat = piyasa?.degismez_sayi ?? null;
+      const total = piyasa?.toplam_hisse ?? null;
       kpis.push({
         label: "Piyasa Geneli",
         val: `${upN}↑ / ${dnN}↓`,
-        sub: `<span class="muted">Top yükselen-düşen</span>`,
+        sub: flat != null
+          ? `<span class="muted">${flat} değişmez${total ? ` · ${total} hisse` : ""}</span>`
+          : `<span class="muted">yükselen · düşen</span>`,
       });
-      $("#dash-kpis").innerHTML = kpis.map(k => `
+      dashKpis.innerHTML = kpis.map(k => `
         <div class="kpi">
           <div class="kpi-label">${escapeHtml(k.label)}</div>
           <div class="kpi-val">${k.val}</div>
           <div class="kpi-sub">${k.sub}</div>
         </div>`).join("");
 
-      $("#dash-yuk-body").innerHTML = renderMoverTable(piyasa?.yukselenler || [], "up");
-      $("#dash-dus-body").innerHTML = renderMoverTable(piyasa?.dusenler  || [], "down");
-      $("#dash-hac-body").innerHTML = renderMoverTable(piyasa?.hacim_liderleri || piyasa?.en_hacimli || piyasa?.hacim || [], "vol");
+      const hac = piyasa?.hacim_liderleri || piyasa?.en_hacimli || piyasa?.hacim || [];
+      const dHac = $("#dash-hac-body"), dHacCnt = $("#dash-hac-cnt");
+      if (dHac) { dHac.classList.remove("loading"); dHac.innerHTML = renderMoverTable(hac, "vol", Infinity); }
+      if (dHacCnt && hac.length) dHacCnt.textContent = `(${hac.length})`;
 
-      // İzlem listem (mini) — fiyatRes zaten yukarıda paralel olarak alındı
       const wbody = $("#dash-watch-body");
       if (wbody) {
+        wbody.classList.remove("loading");
         if (wlPre.length) {
           wbody.innerHTML = renderPriceTable(wlPre, fiyatRes?.fiyatlar || {});
         } else {
           wbody.innerHTML = `<div class="muted">Henüz izlem listenize sembol eklemediniz.</div>`;
         }
       }
-    } catch (e) {
-      // leave previous content
-    }
+    } catch {/**/}
   }
-  addPoller(refresh, 10_000);
+
+  /* Phase 2: full movers (slower) */
+  async function refreshMovers() {
+    try {
+      const movers = await API(`/api/v1/piyasa_movers?user_id=${USER_ID}`);
+      const dYuk = $("#dash-yuk-body"), dDus = $("#dash-dus-body"), dHac = $("#dash-hac-body");
+      const dYukCnt = $("#dash-yuk-cnt"), dDusCnt = $("#dash-dus-cnt"), dHacCnt = $("#dash-hac-cnt");
+      if (!dYuk) return;
+      const yuk = movers?.yukselenler   || [];
+      const dus = movers?.dusenler      || [];
+      const hac = movers?.hacim_liderleri || [];
+      dYuk.classList.remove("loading"); dYuk.innerHTML = renderMoverTable(yuk, "up",   Infinity);
+      dDus.classList.remove("loading"); dDus.innerHTML = renderMoverTable(dus, "down", Infinity);
+      if (hac.length) { dHac.classList.remove("loading"); dHac.innerHTML = renderMoverTable(hac, "vol", Infinity); }
+      if (dYukCnt) dYukCnt.textContent = yuk.length ? `(${yuk.length})` : "";
+      if (dDusCnt) dDusCnt.textContent = dus.length ? `(${dus.length})` : "";
+      if (dHacCnt) dHacCnt.textContent = hac.length ? `(${hac.length})` : "";
+    } catch {/**/}
+  }
+
+  refresh();
+  refreshMovers();
+  addPoller(refresh, 30_000);
+  addPoller(refreshMovers, 60_000);
 }
 
-function renderMoverTable(rows, kind) {
+function renderMoverTable(rows, kind, limit = 8) {
   if (!rows || !rows.length) return `<div class="muted">Veri yok.</div>`;
-  const lim = rows.slice(0, 8);
+  const lim = limit === Infinity ? rows : rows.slice(0, limit);
   const head = kind === "vol"
     ? `<tr><th>Sembol</th><th class="num">Fiyat</th><th class="num">Hacim</th></tr>`
     : `<tr><th>Sembol</th><th class="num">Fiyat</th><th class="num">Değişim</th></tr>`;
@@ -293,11 +326,14 @@ async function renderWatchlist(el) {
   const lastPx = {};
   async function refresh() {
     if (!state.watchlist.length) {
-      $("#wl-body").innerHTML = `<div class="muted">Boş. Üst arama çubuğundan sembol bulup detayda ★ ile ekleyebilirsiniz.</div>`;
+      const wlB = $("#wl-body");
+      if (wlB) wlB.innerHTML = `<div class="muted">Boş. Üst arama çubuğundan sembol bulup detayda ★ ile ekleyebilirsiniz.</div>`;
       return;
     }
     try {
       const r = await API(`/api/v1/fiyatlar?semboller=${state.watchlist.join(",")}&user_id=${USER_ID}`);
+      const wlBody = $("#wl-body");
+      if (!wlBody) return;
       const f = r?.fiyatlar || {};
       const head = `<tr>
         <th>Sembol</th>
@@ -326,9 +362,11 @@ async function renderWatchlist(el) {
           <td class="num"><button class="btn danger" onclick="event.stopPropagation();removeFromWatchlist('${escapeHtml(s)}')">✕</button></td>
         </tr>`;
       }).join("");
-      $("#wl-body").innerHTML = `<table class="tbl">${head}${body}</table>`;
+      wlBody.classList.remove("loading");
+      wlBody.innerHTML = `<table class="tbl">${head}${body}</table>`;
     } catch (e) {
-      $("#wl-body").innerHTML = `<div class="error-box">Yüklenemedi.</div>`;
+      const wlBody = $("#wl-body");
+      if (wlBody) { wlBody.classList.remove("loading"); wlBody.innerHTML = `<div class="error-box">Yüklenemedi.</div>`; }
     }
   }
   addPoller(refresh, 8_000);
@@ -370,31 +408,40 @@ async function renderMarkets(el) {
       <div class="panel-head"><div class="panel-title">Endeksler</div></div>
       <div id="m-idx" class="loading">…</div>
     </div>
-    <div class="grid g-2">
+    <div class="grid g-2" style="margin-bottom:14px">
       <div class="panel">
-        <div class="panel-head"><div class="panel-title">Yükselenler</div></div>
-        <div id="m-yuk" class="loading">…</div>
+        <div class="panel-head">
+          <div class="panel-title">Yükselenler <span id="m-yuk-cnt" class="muted" style="font-size:11px;font-weight:400"></span></div>
+        </div>
+        <div id="m-yuk" class="loading" style="max-height:640px;overflow-y:auto">…</div>
       </div>
       <div class="panel">
-        <div class="panel-head"><div class="panel-title">Düşenler</div></div>
-        <div id="m-dus" class="loading">…</div>
+        <div class="panel-head">
+          <div class="panel-title">Düşenler <span id="m-dus-cnt" class="muted" style="font-size:11px;font-weight:400"></span></div>
+        </div>
+        <div id="m-dus" class="loading" style="max-height:640px;overflow-y:auto">…</div>
       </div>
     </div>
-    <div style="height:14px"></div>
     <div class="panel">
-      <div class="panel-head"><div class="panel-title">Hacim Liderleri</div></div>
-      <div id="m-hac" class="loading">…</div>
+      <div class="panel-head">
+        <div class="panel-title">Hacim Liderleri <span id="m-hac-cnt" class="muted" style="font-size:11px;font-weight:400"></span></div>
+      </div>
+      <div id="m-hac" class="loading" style="max-height:480px;overflow-y:auto">…</div>
     </div>
   `;
 
-  async function refresh() {
+  /* Phase 1: endeksler + hacim (fast) */
+  async function refreshSummary() {
     try {
       const [idx, piyasa] = await Promise.all([
         API(`/api/v1/endeksler?user_id=${USER_ID}`),
         API(`/api/v1/piyasa_ozeti?user_id=${USER_ID}`),
       ]);
+      const mIdx = $("#m-idx");
+      if (!mIdx) return;
+      mIdx.classList.remove("loading");
       const ie = idx?.endeksler || [];
-      $("#m-idx").innerHTML = `
+      mIdx.innerHTML = `
         <table class="tbl">
           <tr><th>Endeks</th><th class="num">Değer</th><th class="num">Önceki</th><th class="num">Değişim</th></tr>
           ${ie.map(e => `<tr>
@@ -404,12 +451,36 @@ async function renderMarkets(el) {
             <td class="num pct ${colorClass(e.change)}">${fmtPct(e.change)}</td>
           </tr>`).join("")}
         </table>`;
-      $("#m-yuk").innerHTML = renderMoverTable(piyasa?.yukselenler || [], "up");
-      $("#m-dus").innerHTML = renderMoverTable(piyasa?.dusenler  || [], "down");
-      $("#m-hac").innerHTML = renderMoverTable(piyasa?.hacim_liderleri || piyasa?.en_hacimli || piyasa?.hacim || [], "vol");
+      const hac = piyasa?.hacim_liderleri || piyasa?.en_hacimli || piyasa?.hacim || [];
+      const mHac = $("#m-hac"), mHacCnt = $("#m-hac-cnt");
+      if (mHac) { mHac.classList.remove("loading"); mHac.innerHTML = renderMoverTable(hac, "vol", Infinity); }
+      if (mHacCnt && hac.length) mHacCnt.textContent = `(${hac.length})`;
     } catch {/**/}
   }
-  addPoller(refresh, 10_000);
+
+  /* Phase 2: full movers list from piyasa_movers (slower — all symbols) */
+  async function refreshMovers() {
+    try {
+      const movers = await API(`/api/v1/piyasa_movers?user_id=${USER_ID}`);
+      const mYuk = $("#m-yuk"), mDus = $("#m-dus"), mHac = $("#m-hac");
+      const mYukCnt = $("#m-yuk-cnt"), mDusCnt = $("#m-dus-cnt"), mHacCnt = $("#m-hac-cnt");
+      if (!mYuk) return;
+      const yuk = movers?.yukselenler    || [];
+      const dus = movers?.dusenler       || [];
+      const hac = movers?.hacim_liderleri || [];
+      mYuk.classList.remove("loading"); mYuk.innerHTML = renderMoverTable(yuk, "up",   Infinity);
+      mDus.classList.remove("loading"); mDus.innerHTML = renderMoverTable(dus, "down", Infinity);
+      if (hac.length && mHac) { mHac.classList.remove("loading"); mHac.innerHTML = renderMoverTable(hac, "vol", Infinity); }
+      if (mYukCnt) mYukCnt.textContent = yuk.length ? `(${yuk.length})` : "";
+      if (mDusCnt) mDusCnt.textContent = dus.length ? `(${dus.length})` : "";
+      if (mHacCnt) mHacCnt.textContent = hac.length ? `(${hac.length})` : "";
+    } catch {/**/}
+  }
+
+  refreshSummary();
+  refreshMovers();
+  addPoller(refreshSummary, 30_000);
+  addPoller(refreshMovers,  60_000);
 }
 
 /* ───────────── SCREENER (sirala_cache 4 modlu) ───────────── */
@@ -432,6 +503,7 @@ async function renderScreener(el) {
         <div class="panel-title">Tarama — sirala_cache</div>
         <div class="panel-actions">
           <input id="sc-filter" placeholder="Filtre…" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:5px 8px;color:var(--text);font-size:11px;width:140px">
+          <button class="btn" id="sc-populate" title="Tüm sembolleri tara ve önbelleği doldur">Doldur</button>
           <button class="btn" id="sc-refresh">Yenile</button>
         </div>
       </div>
@@ -450,6 +522,24 @@ async function renderScreener(el) {
     load();
   });
   $("#sc-refresh").onclick = () => { delete state.cache[state.mode]; load(); };
+  $("#sc-populate").onclick = async () => {
+    const btn = $("#sc-populate");
+    btn.disabled = true; btn.textContent = "Taranıyor…";
+    try {
+      const globalSyms = window._appState.symbols;
+      const syms = globalSyms.length ? globalSyms : undefined;
+      const body = syms ? { mode: state.mode, semboller: syms.slice(0, 150) } : { mode: state.mode };
+      const r = await APIPOST(`/api/v1/sirala_populate`, body);
+      if (r?.ok) {
+        delete state.cache[state.mode];
+        await load();
+        btn.textContent = `Tamam (${r.count ?? "?"})`;
+      } else {
+        btn.textContent = "Hata";
+      }
+    } catch { btn.textContent = "Hata"; }
+    setTimeout(() => { if ($("#sc-populate")) { $("#sc-populate").disabled = false; $("#sc-populate").textContent = "Doldur"; } }, 3000);
+  };
   $("#sc-filter").addEventListener("input", () => render());
   window._scSetSort = (k) => {
     if (state.sortKey === k) state.sortDir = -state.sortDir;
@@ -529,26 +619,59 @@ async function renderAkd(el) {
     $("#akd-results").innerHTML = `<div class="loading">${syms.length} sembol için AKD hesaplanıyor…</div>`;
     try {
       const r = await APIPOST(`/api/v1/akd_bulk`, { semboller: syms, user_id: USER_ID });
-      const out = r?.sonuclar || r?.results || r?.data || r || {};
-      const arr = [];
-      Object.keys(out).forEach(s => arr.push({ sembol: s, ...(out[s] || {}) }));
+      const arr = Array.isArray(r?.sonuclar) ? r.sonuclar
+        : Array.isArray(r?.results) ? r.results
+        : Array.isArray(r?.data) ? r.data
+        : (r && typeof r === "object" && !Array.isArray(r))
+          ? Object.entries(r).filter(([k]) => k !== "ok" && k !== "cached").map(([k,v]) => ({sembol:k,...(v||{})}))
+          : [];
       if (!arr.length) { $("#akd-results").innerHTML = `<div class="muted">Sonuç yok.</div>`; return; }
       const html = arr.map(a => {
-        const son = (a.son_girisler || a.cards || []).slice(0, 6);
-        return `<div class="panel" style="margin-bottom:10px">
-          <div class="panel-head"><div class="panel-title">${escapeHtml(a.sembol)}</div>
-            <div class="panel-actions"><button class="btn" onclick="navTo('symbol','${escapeHtml(a.sembol)}')">Detay →</button></div>
+        const son       = (a.son_girisler || []).slice(0, 8);
+        const alPasta   = (a.alicilar_pasta || []);
+        const satPasta  = (a.saticilar_pasta || []);
+        const sm        = a.smart_money || {};
+        return `<div class="panel" style="margin-bottom:14px">
+          <div class="panel-head">
+            <div class="panel-title" style="display:flex;align-items:center;gap:10px">
+              <span class="sym" style="font-size:15px">${escapeHtml(a.sembol)}</span>
+              <span class="tag ${a.skor>=70?'green':a.skor>=40?'amber':'red'}" style="font-size:11px">Skor ${fmtNum(a.skor,1)}</span>
+              <span class="muted" style="font-size:11px">${escapeHtml(a.top_kurum||"")} ${a.top_oran?fmtNum(a.top_oran,1)+"% top":""}  </span>
+            </div>
+            <div class="panel-actions">
+              <span class="muted" style="font-size:11px">${fmtCurr(a.fiyat,2)} <span class="${colorClass(a.degisim)}">${fmtPct(a.degisim)}</span></span>
+              <button class="btn" onclick="navTo('symbol','${escapeHtml(a.sembol)}')">Detay →</button>
+            </div>
           </div>
-          ${son.length ? `<table class="tbl">
-            <tr><th>Kurum</th><th class="num">Son AKD</th><th class="num">Önceki</th><th class="num">Maliyet</th><th class="num">Fark %</th></tr>
+          <div class="grid g-4" style="margin-bottom:10px">
+            <div class="kpi"><div class="kpi-label">Alan Kurum</div><div class="kpi-val">${a.alan_sayi ?? "—"}</div></div>
+            <div class="kpi"><div class="kpi-label">Satan Kurum</div><div class="kpi-val">${a.satan_sayi ?? "—"}</div></div>
+            <div class="kpi"><div class="kpi-label">Top3 %</div><div class="kpi-val up">${fmtNum(a.top3_oran,1)}%</div></div>
+            <div class="kpi"><div class="kpi-label">Virman</div><div class="kpi-val ${a.virman_sayi>0?'down':'muted'}">${a.virman_sayi ?? 0}</div></div>
+          </div>
+          ${(alPasta.length || satPasta.length) ? `<div class="grid g-2" style="margin-bottom:10px">
+            ${alPasta.length ? `<div>
+              <div class="muted" style="font-size:11px;padding:0 14px 4px">Alıcı Kurumlar</div>
+              <table class="tbl">${alPasta.map(p=>`<tr><td class="sym">${escapeHtml(p.kurum)}</td><td class="num up">${fmtNum(p.oran,1)}%</td></tr>`).join("")}</table>
+            </div>` : ""}
+            ${satPasta.length ? `<div>
+              <div class="muted" style="font-size:11px;padding:0 14px 4px">Satıcı Kurumlar</div>
+              <table class="tbl">${satPasta.map(p=>`<tr><td class="sym">${escapeHtml(p.kurum)}</td><td class="num down">${fmtNum(p.oran,1)}%</td></tr>`).join("")}</table>
+            </div>` : ""}
+          </div>` : ""}
+          ${son.length ? `<div class="muted" style="font-size:11px;padding:0 14px 4px">Son Girişler</div>
+          <table class="tbl">
+            <tr><th>Kurum</th><th class="num">Son AKD</th><th class="num">Önceki</th><th class="num">Maliyet</th><th class="num">Fark %</th><th>İşaret</th></tr>
             ${son.map(c => `<tr>
               <td class="sym">${escapeHtml(c.kurum)}</td>
               <td class="num">${fmtNum(c.son_akd, 2)}</td>
               <td class="num">${fmtNum(c.onceki_akd, 2)}</td>
               <td class="num">${fmtCurr(c.maliyet, 2)}</td>
               <td class="num pct ${colorClass(c.fark_pct)}">${fmtPct(c.fark_pct)}</td>
+              <td class="muted" style="font-size:10px">${escapeHtml(c.isaretci||"")}</td>
             </tr>`).join("")}
-          </table>` : `<div class="muted">Veri yok.</div>`}
+          </table>` : ""}
+          ${sm.toplam_net != null ? `<div class="muted" style="font-size:11px;padding:6px 14px 4px">Smart Money — Net: <b class="${colorClass(sm.toplam_net)}">${fmtVol(sm.toplam_net)}</b> · Çakal: ${sm.cakal_sayi ?? 0} · AKD Mal. ${fmtCurr(sm.akd_maliyet,2)}</div>` : ""}
         </div>`;
       }).join("");
       $("#akd-results").innerHTML = html;
@@ -561,48 +684,124 @@ async function renderAkd(el) {
 /* ───────────── ALARMS ───────────── */
 async function renderAlarms(el) {
   el.innerHTML = `
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">Yeni Alarm Ekle</div></div>
+      <div style="padding:12px 16px">
+        <div class="pf-add-form">
+          <input id="al-sym" type="text" placeholder="Sembol" maxlength="10" class="sym-inp">
+          <select id="al-tip" style="background:var(--panel);border:1px solid var(--border-2);border-radius:6px;padding:6px 10px;color:var(--text);outline:none">
+            <option value="above">Yukarı ≥</option>
+            <option value="below">Aşağı ≤</option>
+          </select>
+          <input id="al-fiyat" type="number" placeholder="Fiyat (₺)" step="0.01" class="num-inp">
+          <input id="al-not" type="text" placeholder="Not (opsiyonel)" style="flex:1;min-width:100px">
+          <button class="btn primary" onclick="alarmAdd()">+ Ekle</button>
+          <button class="btn" onclick="requestNotifPermission()" title="Alarmlar tetiklendiğinde bildirim almak için izin verin">🔔 İzin</button>
+        </div>
+        <div id="al-form-err" style="color:var(--red);font-size:12px;min-height:16px"></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <div class="panel-title">Yerel Alarmlar</div>
+        <div class="panel-actions"><button class="btn" onclick="alarmClearTriggered()">Tetiklenenler Temizle</button></div>
+      </div>
+      <div id="al-local-body">…</div>
+    </div>
     <div class="panel">
       <div class="panel-head">
-        <div class="panel-title">Alarmlar</div>
-        <div class="panel-actions"><button class="btn" id="al-refresh">Yenile</button></div>
+        <div class="panel-title">API Alarmlar</div>
+        <div class="panel-actions"><button class="btn" id="al-refresh">↻ Yenile</button></div>
       </div>
-      <div id="al-body" class="loading">…</div>
-    </div>
-    <div style="height:14px"></div>
-    <div class="panel">
-      <div class="panel-head"><div class="panel-title">Limitler</div></div>
-      <div id="al-lim" class="loading">…</div>
+      <div id="al-api-body" class="loading">…</div>
     </div>
   `;
-  $("#al-refresh").onclick = refresh;
-  async function refresh() {
+
+  const alSymInp = document.getElementById("al-sym");
+  if (alSymInp) alSymInp.addEventListener("keyup", e => { e.target.value = e.target.value.toUpperCase(); });
+
+  function renderLocalAlarms() {
+    const alarms = getLocalAlarms();
+    const body = document.getElementById("al-local-body");
+    if (!body) return;
+    if (!alarms.length) {
+      body.innerHTML = `<div class="muted" style="padding:12px 16px">Yerel alarm yok. Yukarıdan ekleyin.</div>`;
+      return;
+    }
+    const head = `<tr><th>Sembol</th><th>Koşul</th><th class="num">Fiyat</th><th>Not</th><th>Durum</th><th>Eklenme</th><th></th></tr>`;
+    const rows = alarms.map(a => `<tr>
+      <td class="sym clickable" onclick="navTo('symbol','${escapeHtml(a.sembol)}')">${escapeHtml(a.sembol)}</td>
+      <td><span class="tag ${a.tip==='above'?'green':'red'}">${a.tip==='above'?'≥ Yukarı':'≤ Aşağı'}</span></td>
+      <td class="num">${fmtCurr(a.fiyat, 2)}</td>
+      <td class="muted" style="font-size:11px;max-width:120px">${escapeHtml(a.note||'')}</td>
+      <td>${a.triggered
+        ? `<span class="tag amber">Tetiklendi ₺${(a.triggeredPrice||0).toFixed(2)}</span>`
+        : `<span class="tag green">Aktif</span>`}</td>
+      <td class="muted" style="font-size:11px">${escapeHtml((a.createdAt||'').slice(0,16).replace('T',' '))}</td>
+      <td><button class="btn danger" style="padding:2px 8px;font-size:11px" onclick="alarmRemove(${a.id})">Sil</button></td>
+    </tr>`).join("");
+    body.innerHTML = `<table class="tbl">${head}${rows}</table>`;
+  }
+
+  async function loadApiAlarms() {
+    const body = document.getElementById("al-api-body");
+    if (!body) return;
     try {
       const r = await API(`/api/v1/alarm_liste?user_id=${USER_ID}`);
       const list = r?.alarmlar || [];
       if (!list.length) {
-        $("#al-body").innerHTML = `<div class="muted">Aktif alarm yok.</div>`;
+        body.innerHTML = `<div class="muted" style="padding:12px 16px">API'de aktif alarm yok.</div>`;
       } else {
-        const head = `<tr><th>Sembol</th><th>Tip</th><th class="num">Tetik Fiyat</th><th class="num">Güncel</th><th class="num">Çarpan</th><th>Tarih</th></tr>`;
-        const body = list.map(a => `<tr class="clickable" onclick="navTo('symbol','${escapeHtml(a.sembol)}')">
+        const head = `<tr><th>Sembol</th><th>Tip</th><th class="num">Tetik</th><th class="num">Güncel</th><th>Tarih</th></tr>`;
+        const rows = list.map(a => `<tr class="clickable" onclick="navTo('symbol','${escapeHtml(a.sembol)}')">
           <td class="sym">${escapeHtml(a.sembol)}</td>
           <td><span class="tag violet">${escapeHtml(a.alarm_type)}</span></td>
           <td class="num">${a.fiyat == null ? "—" : fmtNum(a.fiyat,2)}</td>
           <td class="num">${a.guncel_fiyat == null ? "—" : fmtNum(a.guncel_fiyat,2)}</td>
-          <td class="num">${a.carpan ?? "—"}</td>
           <td class="muted" style="font-size:11px">${escapeHtml((a.tarih||"").replace("T"," ").slice(0,16))}</td>
         </tr>`).join("");
-        $("#al-body").innerHTML = `<table class="tbl">${head}${body}</table>`;
+        body.innerHTML = `<table class="tbl">${head}${rows}</table>`;
       }
-      const lim = r?.limitler || {};
-      const li = Object.keys(lim);
-      $("#al-lim").innerHTML = li.length ? `<div class="chip-grid">${li.map(k => `
-        <div class="chip"><div class="lab">${escapeHtml(k)}</div><div class="val">${escapeHtml(String(lim[k]))}</div></div>`).join("")}</div>` :
-        `<div class="muted">—</div>`;
     } catch {
-      $("#al-body").innerHTML = `<div class="error-box">Alarm listesi alınamadı.</div>`;
+      const b = document.getElementById("al-api-body");
+      if (b) b.innerHTML = `<div class="muted" style="padding:12px 16px">API alarmları alınamadı.</div>`;
     }
   }
-  refresh();
+
+  renderLocalAlarms();
+  loadApiAlarms();
+  document.getElementById("al-refresh").onclick = loadApiAlarms;
+
+  window.alarmAdd = function() {
+    const sym  = (document.getElementById("al-sym")?.value  || "").toUpperCase().trim();
+    const tip  = document.getElementById("al-tip")?.value;
+    const fiyat = parseFloat(document.getElementById("al-fiyat")?.value || "");
+    const not  = document.getElementById("al-not")?.value || "";
+    const errEl = document.getElementById("al-form-err");
+    if (!sym)             { if (errEl) errEl.textContent = "Sembol gerekli"; return; }
+    if (!fiyat || fiyat <= 0) { if (errEl) errEl.textContent = "Geçerli fiyat girin"; return; }
+    if (errEl) errEl.textContent = "";
+    addLocalAlarm(sym, tip, fiyat, not);
+    ["al-sym","al-fiyat","al-not"].forEach(id => { const i = document.getElementById(id); if (i) i.value = ""; });
+    renderLocalAlarms();
+  };
+  window.alarmRemove = function(id) {
+    removeLocalAlarm(id);
+    renderLocalAlarms();
+  };
+  window.alarmClearTriggered = function() {
+    saveLocalAlarms(getLocalAlarms().filter(a => !a.triggered));
+    renderLocalAlarms();
+  };
+  window.requestNotifPermission = function() {
+    if ("Notification" in window) {
+      Notification.requestPermission().then(p => {
+        alert(p === "granted" ? "✅ Bildirim izni verildi. Alarmlar tetiklendiğinde bildirim alırsınız." : "❌ Bildirim izni reddedildi.");
+      });
+    } else {
+      alert("Bu tarayıcı bildirimleri desteklemiyor.");
+    }
+  };
 }
 
 /* ───────────── SETTINGS ───────────── */
@@ -652,7 +851,9 @@ async function renderSettings(el) {
   // telegram status
   try {
     const s = await API(`/api/v1/telegram/status`);
-    $("#se-tg").innerHTML = `
+    const seTg = $("#se-tg");
+    if (!seTg) return;
+    seTg.innerHTML = `
       <div class="k">Telegram Oturumu</div><div class="v">${s.logged_in ? "<span class='tag green'>Açık</span>" : "<span class='tag red'>Kapalı</span>"}</div>
       <div class="k">Bot</div><div class="v">@${escapeHtml(s.bot_username || "—")}</div>
       <div class="k">init_data Yaşı</div><div class="v">${s.init_age_hours == null ? "—" : (s.init_age_hours + " saat" + (s.init_expired ? " (DOLMUŞ)" : ""))}</div>
@@ -660,7 +861,8 @@ async function renderSettings(el) {
       <div class="k">Son Hata</div><div class="v">${escapeHtml(s.last_refresh_error || "—")}</div>
     `;
   } catch {
-    $("#se-tg").innerHTML = `<div class="muted">Durum alınamadı.</div>`;
+    const seTg = $("#se-tg");
+    if (seTg) seTg.innerHTML = `<div class="muted">Durum alınamadı.</div>`;
   }
   $("#se-refresh-init").onclick = async () => {
     $("#se-refresh-init").disabled = true;
@@ -679,23 +881,26 @@ async function renderSettings(el) {
       API(`/api/v1/kanal_kontrol`).catch(()=>null),
       API(`/api/v1/sponsor/durum`).catch(()=>null),
     ]);
-    $("#se-kanal").innerHTML = `
+    const seKanal = $("#se-kanal");
+    if (!seKanal) return;
+    seKanal.innerHTML = `
       <div class="k">Kanal Üyeliği</div><div class="v">${k?.uye ? "<span class='tag green'>Üye</span>" : "<span class='tag red'>Üye değil</span>"}</div>
       <div class="k">Kanal Adı</div><div class="v">${escapeHtml(k?.kanal || "—")}</div>
       <div class="k">Sponsor</div><div class="v">${sp?.katildi ? "<span class='tag green'>Katıldı</span>" : "<span class='tag amber'>Katılmadı</span>"}</div>
       <div class="k">Sponsor Linki</div><div class="v">${sp?.link ? `<a href="${escapeHtml(sp.link)}" target="_blank">${escapeHtml(sp.link)}</a>` : "—"}</div>
     `;
+    const seWl = $("#se-wl");
+    if (seWl) seWl.innerHTML = state.watchlist.length
+      ? state.watchlist.map(s => `<span class="tag gray" style="margin:2px 4px 2px 0;cursor:pointer" onclick="navTo('symbol','${escapeHtml(s)}')">${escapeHtml(s)}</span>`).join("")
+      : "Boş.";
   } catch {/**/}
-
-  $("#se-wl").innerHTML = state.watchlist.length
-    ? state.watchlist.map(s => `<span class="tag gray" style="margin:2px 4px 2px 0;cursor:pointer" onclick="navTo('symbol','${escapeHtml(s)}')">${escapeHtml(s)}</span>`).join("")
-    : "Boş.";
 }
 
 /* ───────────── SYMBOL DETAIL ───────────── */
 async function renderSymbol(el, sym) {
   if (!sym) { el.innerHTML = `<div class="error-box">Sembol belirtilmemiş.</div>`; return; }
   sym = sym.toUpperCase();
+  trackRecent(sym);
   el.innerHTML = `
     <a class="back-btn" onclick="history.back()">← Geri</a>
     <div id="sym-head" class="loading">${escapeHtml(sym)} yükleniyor…</div>
@@ -714,6 +919,10 @@ async function renderSymbol(el, sym) {
       <span class="tab" data-tab="akd">AKD</span>
       <span class="tab" data-tab="takas">Takas</span>
       <span class="tab" data-tab="rtakas">R.Takas</span>
+      <span class="tab" data-tab="kap">KAP</span>
+      <span class="tab" data-tab="analist">Analist</span>
+      <span class="tab" data-tab="gerialim">Geri Alım</span>
+      <span class="tab" data-tab="akis">Akış</span>
     </div>
     <div id="sym-body" class="loading">…</div>
   `;
@@ -727,20 +936,24 @@ async function renderSymbol(el, sym) {
     renderTab();
   });
 
-  let analiz = null, prices = null;
+  let analiz = null, prices = null, f = {};
   try {
     [analiz, prices] = await Promise.all([
       API(`/api/v1/analiz?sembol=${encodeURIComponent(sym)}&user_id=${USER_ID}`),
       API(`/api/v1/fiyatlar?semboller=${encodeURIComponent(sym)}&user_id=${USER_ID}`),
     ]);
   } catch {
-    $("#sym-head").innerHTML = `<div class="error-box">Sembol bilgisi alınamadı.</div>`;
+    const hErr = $("#sym-head");
+    if (hErr) hErr.innerHTML = `<div class="error-box">Sembol bilgisi alınamadı.</div>`;
     return;
   }
-  const f = (prices?.fiyatlar || {})[sym] || {};
+  if (!el.isConnected) return;
+  f = (prices?.fiyatlar || {})[sym] || {};
   const inWl = inWatchlist(sym);
   const logoUrl = analiz?.logo ? analiz.logo : null;
-  $("#sym-head").innerHTML = `
+  const symHead = $("#sym-head");
+  if (!symHead) return;
+  symHead.innerHTML = `
     <div class="sym-head">
       <div class="logo">${logoUrl ? `<img src="${escapeHtml(logoUrl)}" onerror="this.replaceWith(document.createTextNode('${escapeHtml(sym.slice(0,2))}'))">` : escapeHtml(sym.slice(0,2))}</div>
       <div>
@@ -782,6 +995,7 @@ async function renderSymbol(el, sym) {
 
   function renderTab() {
     const body = $("#sym-body");
+    if (!body) return;
     body.innerHTML = `<div class="loading">…</div>`;
     if (activeTab === "overview")  return renderOverviewTab(body, sym, analiz, f);
     if (activeTab === "derinlik")  return renderDerinlikTab(body, sym);
@@ -797,51 +1011,371 @@ async function renderSymbol(el, sym) {
     if (activeTab === "akd")       return renderAkdTab(body, sym);
     if (activeTab === "takas")     return renderTakasTab(body, sym, "takas");
     if (activeTab === "rtakas")    return renderTakasTab(body, sym, "realtakas");
+    if (activeTab === "kap")       return renderKapTab(body, sym);
+    if (activeTab === "analist")   return renderAnalistTab(body, sym);
+    if (activeTab === "gerialim")  return renderGeriAlimTab(body, sym);
+    if (activeTab === "akis")      return renderAkisTab(body, sym);
   }
   renderTab();
 }
 
 async function renderOverviewTab(body, sym, analiz, f) {
+  const an  = analiz?.analiz || {};
+  const ta  = analiz?.temel_analiz || {};
+  const dir = an.direncler || {};
+  const fibRows  = dir.fibonacci || [];
+  const hacRows  = dir.hacim    || [];
+  const sinyaller = an.sinyaller || [];
+  const tahmin   = an.tahmin || null;
+  const tahminler = an.tahminler || null;
+
+  function drTable(rows) {
+    if (!rows.length) return '<div class="muted" style="padding:8px">Veri yok</div>';
+    return `<table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr>
+        <th style="text-align:left;padding:4px 6px;color:var(--muted)">Tür</th>
+        <th style="text-align:right;padding:4px 6px;color:var(--muted)">Fiyat</th>
+        <th style="text-align:right;padding:4px 6px;color:var(--muted)">Değişim</th>
+      </tr></thead>
+      <tbody>${rows.map(r => {
+        const isDestek = r.tur === "Destek";
+        const isDir    = r.tur === "Direnç";
+        const cls = isDestek ? "down" : isDir ? "up" : "muted";
+        const label = r.tur || "—";
+        return `<tr style="border-top:1px solid var(--border)">
+          <td style="padding:4px 6px" class="${cls}">${escapeHtml(label)}</td>
+          <td style="padding:4px 6px;text-align:right;font-variant-numeric:tabular-nums">${r.fiyat != null ? fmtNum(r.fiyat,2) : "—"}</td>
+          <td style="padding:4px 6px;text-align:right" class="${r.degisim ? colorClass(parseFloat(r.degisim)) : ''}">${r.degisim ? escapeHtml(r.degisim) : "—"}</td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table>`;
+  }
+
+  function riskColor(risk) {
+    if (!risk) return "";
+    if (risk.includes("Çok Yüksek")) return "down";
+    if (risk.includes("Yüksek"))     return "down";
+    if (risk.includes("Orta"))       return "muted";
+    if (risk.includes("Düşük"))      return "up";
+    return "";
+  }
+
   body.innerHTML = `
     <div class="panel" style="margin-bottom:14px">
-      <div class="panel-head"><div class="panel-title">Fiyat Grafiği — Günlük</div>
-        <div class="panel-actions" id="ov-res">
-          <button class="btn active" data-r="D">D</button>
-          <button class="btn" data-r="W">W</button>
+      <div class="panel-head"><div class="panel-title">Fiyat Grafiği</div>
+        <div class="panel-actions chart-toolbar">
+          <button class="btn active" id="ov-ct-line">Çizgi</button>
+          <button class="btn" id="ov-ct-candle">Mum</button>
+          <div class="sep"></div>
+          <div id="ov-res" style="display:flex;gap:4px">
+            <button class="btn active" data-r="D">Günlük</button>
+            <button class="btn" data-r="W">Haftalık</button>
+          </div>
         </div>
       </div>
       <div id="ov-chart" class="chart-wrap"><div class="loading">grafik…</div></div>
     </div>
-    <div class="grid g-4" id="ov-stats"></div>
-    <div style="height:14px"></div>
-    <div class="panel">
+
+    <div class="grid g-4" id="ov-stats" style="margin-bottom:14px"></div>
+
+    <div class="panel" style="margin-bottom:14px">
       <div class="panel-head"><div class="panel-title">Getiriler</div></div>
       <div class="chip-grid" id="ov-returns"></div>
     </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">HissePlus Analiz</div></div>
+      <div class="grid g-4" id="ov-analiz-kpi" style="margin-bottom:12px"></div>
+      ${an.trend ? `<div style="padding:0 4px 10px;font-size:12px;line-height:1.6;color:var(--text-muted)">${escapeHtml(an.trend)}</div>` : ""}
+      ${tahmin ? `<div style="background:var(--panel-alt,#151d28);border-radius:8px;padding:10px 14px;margin-bottom:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Yakın Dönem Tahmini (${escapeHtml(tahmin.tarih||"")})</div>
+        <div style="font-size:14px;font-weight:600">${escapeHtml(tahmin.fiyat||"")}</div>
+        ${tahmin.yorum ? `<div style="font-size:12px;color:var(--text-muted);margin-top:6px;line-height:1.5">${escapeHtml(tahmin.yorum)}</div>` : ""}
+      </div>` : ""}
+      ${tahminler ? `<div class="chip-grid" style="margin-bottom:10px">
+        ${tahminler.uc_ay ? `<div class="chip"><div class="lab">3 Ay Tahmini</div><div class="val">${escapeHtml(tahminler.uc_ay.fiyat||"")} <span class="muted">(${escapeHtml(tahminler.uc_ay.oran||"")})</span></div></div>` : ""}
+        ${tahminler.bi_sene ? `<div class="chip"><div class="lab">1 Yıl Tahmini</div><div class="val">${escapeHtml(tahminler.bi_sene.fiyat||"")} <span class="muted">(${escapeHtml(tahminler.bi_sene.oran||"")})</span></div></div>` : ""}
+      </div>` : ""}
+      ${an.sinyal ? `<div style="background:var(--panel-alt,#151d28);border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:12px;line-height:1.6;color:var(--text-muted)">${escapeHtml(an.sinyal)}</div>` : ""}
+      ${an.gunluk ? `<div style="padding:0 4px 4px;font-size:12px;line-height:1.6;color:var(--text-muted)">${escapeHtml(an.gunluk)}</div>` : ""}
+      ${sinyaller.length ? `<div style="margin-top:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px;padding:0 4px">Son Sinyaller</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr>
+            <th style="text-align:left;padding:4px 6px;color:var(--muted)">Sinyal</th>
+            <th style="text-align:left;padding:4px 6px;color:var(--muted)">Tarih</th>
+            <th style="text-align:left;padding:4px 6px;color:var(--muted)">Yön</th>
+          </tr></thead>
+          <tbody>${sinyaller.map(s => `<tr style="border-top:1px solid var(--border)">
+            <td style="padding:4px 6px">${escapeHtml(s.veri||"")}</td>
+            <td style="padding:4px 6px;color:var(--muted)">${escapeHtml(s.tarih||"")} <span class="muted">(${escapeHtml(s.gun||"")})</span></td>
+            <td style="padding:4px 6px" class="${s.yon==='High'?'up':'down'}">${s.yon==='High'?'▲ Yükseliş':'▼ Düşüş'}</td>
+          </tr>`).join("")}</tbody>
+        </table>
+      </div>` : ""}
+    </div>
+
+    ${(fibRows.length || hacRows.length) ? `<div class="grid g-2" style="margin-bottom:14px">
+      ${fibRows.length ? `<div class="panel">
+        <div class="panel-head"><div class="panel-title">Fibonacci Destek / Direnç</div></div>
+        ${drTable(fibRows)}
+      </div>` : ""}
+      ${hacRows.length ? `<div class="panel">
+        <div class="panel-head"><div class="panel-title">Hacim Destek / Direnç</div></div>
+        ${drTable(hacRows)}
+      </div>` : ""}
+    </div>` : ""}
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">Temel Analiz</div></div>
+      <div class="chip-grid" id="ov-temel"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">Değerleme</div></div>
+      <div class="chip-grid" id="ov-deger"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">Finansal</div></div>
+      <div class="chip-grid" id="ov-finansal"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">Sektör Karşılaştırması</div></div>
+      <div id="ov-sektor"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">Değerleme Skorları</div></div>
+      <div id="ov-skorlar"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <div class="panel-title">Notlarım</div>
+        <span class="notes-saved" id="ov-notes-saved">kaydedildi ✓</span>
+      </div>
+      <div style="padding:10px 14px">
+        <textarea id="ov-notes" class="notes-area" placeholder="Bu hisse için kişisel notlarınızı buraya yazın…"></textarea>
+      </div>
+    </div>
   `;
-  // KPIs
+
+  // Fiyat KPIs
   const stats = [
-    ["Fiyat", fmtCurr(f.fiyat ?? analiz?.fiyat, 2)],
-    ["Hacim (TL)", fmtVol(f.hacim ?? analiz?.hacim)],
+    ["Fiyat",       fmtCurr(f.fiyat ?? analiz?.fiyat, 2)],
+    ["Değişim",     `<span class="${colorClass(f.degisim)}">${arrowFor(f.degisim)} ${fmtPct(f.degisim)}</span>`],
+    ["Hacim (TL)",  fmtVol(f.hacim  ?? analiz?.hacim)],
     ["Hacim (Lot)", fmtVol(f.hacim_lot)],
-    ["Alış / Satış", `${fmtNum(f.alis,2)} / ${fmtNum(f.satis,2)}`],
+    ["Alış",        fmtNum(f.alis,  2)],
+    ["Satış",       fmtNum(f.satis, 2)],
   ];
   $("#ov-stats").innerHTML = stats.map(([k,v]) => `
     <div class="kpi">
       <div class="kpi-label">${escapeHtml(k)}</div>
       <div class="kpi-val">${v}</div>
     </div>`).join("");
+
+  // Getiriler
   const ret = [
-    ["1 Hafta", f.getiri_1h], ["1 Ay", f.getiri_1a], ["3 Ay", f.getiri_3a],
-    ["6 Ay", f.getiri_6a], ["YTD", f.getiri_ytd], ["1 Yıl", f.getiri_1y],
+    ["1H", f.getiri_1h], ["1A", f.getiri_1a], ["3A", f.getiri_3a],
+    ["6A", f.getiri_6a], ["YTD", f.getiri_ytd], ["1Y", f.getiri_1y],
   ];
   $("#ov-returns").innerHTML = ret.map(([k,v]) => `
     <div class="chip">
       <div class="lab">${escapeHtml(k)}</div>
       <div class="val ${colorClass(v)}">${fmtPct(v)}</div>
     </div>`).join("");
-  // chart
-  let res = "D";
+
+  // HissePlus Analiz KPIs
+  const anKpis = [
+    ["HP Puan",   an.puan != null ? fmtNum(an.puan, 3) : "—", ""],
+    ["Risk",      an.risk || "—",                              riskColor(an.risk)],
+    ["Pivot",     an.pivot || "—",                            an.pivot === "Zirve" ? "up" : an.pivot === "Dip" ? "down" : ""],
+    ["Pivot Ne Zaman", an.pivot_zaman || "—",                 "muted"],
+    ["Yön",       an.upwards != null ? (an.upwards ? "▲ Yukarı" : "▼ Aşağı") : "—", an.upwards ? "up" : "down"],
+    ["Stop",      an.stop != null ? fmtNum(an.stop, 2) : "—", "down"],
+  ];
+  $("#ov-analiz-kpi").innerHTML = anKpis.map(([k,v,cls]) => `
+    <div class="kpi">
+      <div class="kpi-label">${escapeHtml(k)}</div>
+      <div class="kpi-val ${cls}">${v}</div>
+    </div>`).join("");
+
+  // Temel Analiz chips
+  const temelChips = [
+    ["F/K",          ta["Hisse F/K Oranı"]   != null ? fmtNum(ta["Hisse F/K Oranı"],2)  : "—"],
+    ["PD/DD",        ta["Hisse PD/DD Oranı"] != null ? fmtNum(ta["Hisse PD/DD Oranı"],2): "—"],
+    ["Sektör F/K",   ta["Sektör F/K Oranı"]  != null ? fmtNum(ta["Sektör F/K Oranı"],2) : "—"],
+    ["Sektör PD/DD", ta["Sektör PD/DD Oranı"]!= null ? fmtNum(ta["Sektör PD/DD Oranı"],2):"—"],
+    ["Sektör",       ta["Sektör"] || "—"],
+    ["Piyasa Değeri",ta["Güncel Piyasa Değeri"] != null ? fmtVol(ta["Güncel Piyasa Değeri"]) : "—"],
+  ];
+  $("#ov-temel").innerHTML = temelChips.map(([k,v]) => `
+    <div class="chip"><div class="lab">${escapeHtml(k)}</div><div class="val">${v}</div></div>`).join("");
+
+  // Değerleme chips
+  const degerChips = [
+    ["Değerleme Fiyatı",      ta["Hissenin Değerleme Fiyatı (₺)"]                 != null ? fmtCurr(ta["Hissenin Değerleme Fiyatı (₺)"],2)                 : "—"],
+    ["Prim Potansiyeli",      ta["Hissenin Prim Potansiyeli (%)"]                  != null ? fmtPct(ta["Hissenin Prim Potansiyeli (%)"])                     : "—"],
+    ["Bedelsiz Potansiyeli",  ta["Hissenin Bedelsiz Potansiyeli (%)"]              != null ? fmtPct(ta["Hissenin Bedelsiz Potansiyeli (%)"])                  : "—"],
+    ["Endeks Bazlı Fiyat",    ta["Hissenin Endekse Göre Olması Gereken Fiyatı (₺)"]!= null ? fmtCurr(ta["Hissenin Endekse Göre Olması Gereken Fiyatı (₺)"],2): "—"],
+    ["Sektör Bazlı Fiyat",    ta["Hissenin Sektöre Göre Olması Gereken Fiyatı (₺)"]!=null ? fmtCurr(ta["Hissenin Sektöre Göre Olması Gereken Fiyatı (₺)"],2): "—"],
+  ];
+  const prim = ta["Hissenin Prim Potansiyeli (%)"];
+  const bedelsiz = ta["Hissenin Bedelsiz Potansiyeli (%)"];
+  $("#ov-deger").innerHTML = degerChips.map(([k,v], i) => {
+    const cls = i === 1 ? colorClass(prim) : i === 2 ? colorClass(bedelsiz) : "";
+    return `<div class="chip"><div class="lab">${escapeHtml(k)}</div><div class="val ${cls}">${v}</div></div>`;
+  }).join("");
+
+  // Finansal chips
+  const fmtMilyar = v => v != null ? `${(v/1e9).toFixed(2)} Mrd ₺` : "—";
+  const finansalChips = [
+    ["12A Net Kâr",          fmtMilyar(ta["12 Aylık Net Kâr"])],
+    ["Yıl Sonu Tahmin Kâr",  fmtMilyar(ta["Yıl Sonu Tahmini Net Kâr"])],
+    ["Ödenmiş Sermaye",      fmtMilyar(ta["Ödenmiş Sermaye"])],
+    ["Özsermaye",            fmtMilyar(ta["Özsermaye"])],
+  ];
+  const netKar = ta["12 Aylık Net Kâr"];
+  $("#ov-finansal").innerHTML = finansalChips.map(([k,v], i) => {
+    const cls = i === 0 ? colorClass(netKar) : "";
+    return `<div class="chip"><div class="lab">${escapeHtml(k)}</div><div class="val ${cls}">${v}</div></div>`;
+  }).join("");
+
+  // Sektör Karşılaştırması
+  const sektorEl = $("#ov-sektor");
+  if (sektorEl) {
+    const hisseFiyat  = f.fiyat ?? analiz?.fiyat;
+    const hisseFK     = ta["Hisse F/K Oranı"];
+    const hissePDDD   = ta["Hisse PD/DD Oranı"];
+    const sektorFK    = ta["Sektör F/K Oranı"];
+    const sektorPDDD  = ta["Sektör PD/DD Oranı"];
+    const sektorAdi   = ta["Sektör"] || "Sektör";
+    const sektorFiyat = ta["Hissenin Sektöre Göre Olması Gereken Fiyatı (₺)"];
+    const endeksFiyat = ta["Hissenin Endekse Göre Olması Gereken Fiyatı (₺)"];
+    const degerFiyat  = ta["Hissenin Değerleme Fiyatı (₺)"];
+    const pdMilyar    = v => v != null ? `${(v/1e9).toFixed(1)} Mrd ₺` : "—";
+    const piyasaDeger = ta["Güncel Piyasa Değeri"];
+
+    const rowStyle = "border-top:1px solid var(--border)";
+    const thStyle  = "padding:6px 10px;text-align:right;color:var(--muted);font-size:11px;font-weight:500";
+    const tdStyle  = "padding:6px 10px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums";
+    const tdLStyle = "padding:6px 10px;text-align:left;font-size:12px;color:var(--muted)";
+
+    // F/K comparison color: lower is cheaper (positive for hisse vs sektör)
+    const fkCls = (hisseFK != null && sektorFK != null && sektorFK > 0)
+      ? (hisseFK < sektorFK ? "up" : "down") : "";
+
+    sektorEl.innerHTML = `
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr>
+          <th style="${thStyle};text-align:left">Metrik</th>
+          <th style="${thStyle}">${escapeHtml(sym)}</th>
+          <th style="${thStyle}">${escapeHtml(sektorAdi)}</th>
+        </tr></thead>
+        <tbody>
+          <tr style="${rowStyle}">
+            <td style="${tdLStyle}">F/K Oranı</td>
+            <td style="${tdStyle}" class="${fkCls}">${hisseFK != null ? fmtNum(hisseFK,2) : "—"}</td>
+            <td style="${tdStyle}">${sektorFK  != null ? fmtNum(sektorFK,2)  : "—"}</td>
+          </tr>
+          <tr style="${rowStyle}">
+            <td style="${tdLStyle}">PD/DD Oranı</td>
+            <td style="${tdStyle}">${hissePDDD != null ? fmtNum(hissePDDD,2) : "—"}</td>
+            <td style="${tdStyle}">${sektorPDDD!= null ? fmtNum(sektorPDDD,2): "—"}</td>
+          </tr>
+          <tr style="${rowStyle}">
+            <td style="${tdLStyle}">Mevcut Fiyat</td>
+            <td style="${tdStyle}">${hisseFiyat != null ? fmtCurr(hisseFiyat,2) : "—"}</td>
+            <td style="${tdStyle} color:var(--muted)">—</td>
+          </tr>
+          <tr style="${rowStyle}">
+            <td style="${tdLStyle}">Sektör Bazlı Hedef</td>
+            <td style="${tdStyle} ${sektorFiyat != null && hisseFiyat != null ? colorClass(sektorFiyat - hisseFiyat) : ''}">${sektorFiyat != null ? fmtCurr(sektorFiyat,2) : "—"}</td>
+            <td style="${tdStyle} color:var(--muted)">—</td>
+          </tr>
+          <tr style="${rowStyle}">
+            <td style="${tdLStyle}">Endeks Bazlı Hedef</td>
+            <td style="${tdStyle} ${endeksFiyat != null && hisseFiyat != null ? colorClass(endeksFiyat - hisseFiyat) : ''}">${endeksFiyat != null ? fmtCurr(endeksFiyat,2) : "—"}</td>
+            <td style="${tdStyle} color:var(--muted)">—</td>
+          </tr>
+          <tr style="${rowStyle}">
+            <td style="${tdLStyle}">Değerleme Fiyatı</td>
+            <td style="${tdStyle} ${degerFiyat != null && hisseFiyat != null ? colorClass(degerFiyat - hisseFiyat) : ''}">${degerFiyat != null ? fmtCurr(degerFiyat,2) : "—"}</td>
+            <td style="${tdStyle} color:var(--muted)">—</td>
+          </tr>
+          <tr style="${rowStyle}">
+            <td style="${tdLStyle}">Piyasa Değeri</td>
+            <td style="${tdStyle}">${pdMilyar(piyasaDeger)}</td>
+            <td style="${tdStyle} color:var(--muted)">—</td>
+          </tr>
+        </tbody>
+      </table>`;
+  }
+
+  // Değerleme Skorları (1-9)
+  const skorEl = $("#ov-skorlar");
+  if (skorEl) {
+    const skorKeys = [
+      ["1) Sektör F/K Oranına Göre",                    "Sektör F/K'ya Göre"],
+      ["2) Endeks F/K Oranına Göre",                    "Endeks F/K'ya Göre"],
+      ["3) Sektör Future's F/K Oranına Göre",           "Sektör Gelecek F/K'ya Göre"],
+      ["4) Endeks Future's F/K Oranına Göre",           "Endeks Gelecek F/K'ya Göre"],
+      ["5) Sektör PD/DD Oranına Göre",                  "Sektör PD/DD'ye Göre"],
+      ["6) Endeks PD/DD Oranına Göre",                  "Endeks PD/DD'ye Göre"],
+      ["7) Ödenmiş Sermayeye Göre",                     "Ödenmiş Sermayeye Göre"],
+      ["8) Potansiyel Piyasa Değerine Göre",            "Potansiyel PD'ye Göre"],
+      ["9) Yıl Sonu Tahmini Özsermaye Kârlılığına Göre","Özsermaye Kârlılığına Göre"],
+    ];
+    const rowStyle = "border-top:1px solid var(--border)";
+    const validScores = skorKeys.filter(([k]) => ta[k] != null && ta[k] !== 0);
+    if (validScores.length === 0) {
+      skorEl.innerHTML = `<div class="muted" style="padding:10px 12px;font-size:12px">Veri yok</div>`;
+    } else {
+      skorEl.innerHTML = `<table style="width:100%;border-collapse:collapse">
+        <thead><tr>
+          <th style="padding:6px 10px;text-align:left;color:var(--muted);font-size:11px">Yöntem</th>
+          <th style="padding:6px 10px;text-align:right;color:var(--muted);font-size:11px">Potansiyel (%)</th>
+        </tr></thead>
+        <tbody>${skorKeys.map(([k, label]) => {
+          const v = ta[k];
+          if (v == null) return "";
+          const cls = colorClass(v);
+          return `<tr style="${rowStyle}">
+            <td style="padding:5px 10px;font-size:12px;color:var(--text-muted)">${escapeHtml(label)}</td>
+            <td style="padding:5px 10px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums" class="${cls}">${v > 0 ? "+" : ""}${fmtNum(v,2)}%</td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>`;
+    }
+  }
+
+  // Notes
+  const notesArea = document.getElementById("ov-notes");
+  if (notesArea) {
+    notesArea.value = getNotes(sym);
+    let saveTimer = null;
+    notesArea.addEventListener("input", () => {
+      setNotes(sym, notesArea.value);
+      const badge = document.getElementById("ov-notes-saved");
+      if (badge) {
+        badge.classList.remove("show");
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => badge.classList.add("show"), 500);
+        setTimeout(() => badge.classList.remove("show"), 2500);
+      }
+    });
+  }
+
+  // Chart
+  let res = "D", chartType = "line";
+  const ctLine = document.getElementById("ov-ct-line");
+  const ctCandle = document.getElementById("ov-ct-candle");
+  if (ctLine) ctLine.onclick = () => { chartType = "line"; ctLine.classList.add("active"); if (ctCandle) ctCandle.classList.remove("active"); drawChart(); };
+  if (ctCandle) ctCandle.onclick = () => { chartType = "candle"; ctCandle.classList.add("active"); if (ctLine) ctLine.classList.remove("active"); drawChart(); };
+
   $$("#ov-res .btn").forEach(b => b.onclick = () => {
     res = b.dataset.r;
     $$("#ov-res .btn").forEach(x => x.classList.toggle("active", x === b));
@@ -856,9 +1390,11 @@ async function renderOverviewTab(body, sym, analiz, f) {
       const slot2 = $("#ov-chart");
       if (!slot2) return;
       const o = r?.ohlcv || {};
-      const t = o.t || [], c = o.c || [];
+      const t = o.t || [], c = o.c || [], op = o.o || [], h = o.h || [], l = o.l || [];
       if (!t.length) { slot2.innerHTML = `<div class="muted">Veri yok.</div>`; return; }
-      slot2.innerHTML = svgLineChart(t, c);
+      slot2.innerHTML = chartType === "candle" && op.length
+        ? svgCandleChart(t, op, h, l, c)
+        : svgLineChart(t, c);
     } catch {
       const slot3 = $("#ov-chart");
       if (slot3) slot3.innerHTML = `<div class="error-box">Grafik verisi alınamadı.</div>`;
@@ -1147,23 +1683,93 @@ function renderAnalizTab(body, sym, analiz) {
   }
   const a = analiz.analiz || {};
   const t = analiz.temel_analiz || {};
-  const fin = analiz.finansallar || {};
-  const trend = a.trend || a.gunluk || a.yorum || "—";
-  const sinList = a.sinyaller || [];
-  const tahList = a.tahminler || [];
-  const dirList = a.direncler || [];
+  const karne = analiz.karne || {};
+
+  // sinyaller: array of {veri, yon, tarih, gun} objects
+  const sinList = (a.sinyaller || []);
+  const sinHtml = sinList.length ? `<div style="height:14px"></div>
+    <div class="panel"><div class="panel-head"><div class="panel-title">Sinyaller (${sinList.length})</div></div>
+    <table class="tbl">
+      <tr><th>Sinyal</th><th>Yön</th><th>Tarih</th><th>Süre</th></tr>
+      ${sinList.map(s => {
+        const isAl = (s.yon||"").toLowerCase().includes("buy") || (s.yon||"").toLowerCase().includes("high");
+        return `<tr>
+          <td>${escapeHtml(s.veri || String(s))}</td>
+          <td class="${isAl?'up':'down'}">${escapeHtml(s.yon||"")}</td>
+          <td class="muted">${escapeHtml(s.tarih||"")}</td>
+          <td class="muted">${escapeHtml(s.gun||"")}</td>
+        </tr>`;
+      }).join("")}
+    </table></div>` : "";
+
+  // tahmin: single forecast object {yorum, tarih, fiyat}
+  const tahmin = a.tahmin || {};
+  const tahminHtml = tahmin.yorum ? `<div style="height:14px"></div>
+    <div class="panel"><div class="panel-head"><div class="panel-title">Analiz Yorumu</div><div class="muted">${escapeHtml(tahmin.tarih||"")}</div></div>
+    <div style="padding:0 14px 14px;font-size:13px;line-height:1.7">${escapeHtml(tahmin.yorum)}</div>
+    ${tahmin.fiyat ? `<div style="padding:0 14px 14px"><span class="muted">Tahmin Fiyat: </span><b class="up">${escapeHtml(tahmin.fiyat)}</b></div>` : ""}
+    </div>` : "";
+
+  // tahminler: dict {uc_ay: {fiyat, oran}, bi_sene: {fiyat, oran}}
+  const tahminler = a.tahminler || {};
+  const tahminlerHtml = (tahminler.uc_ay || tahminler.bi_sene) ? `<div style="height:14px"></div>
+    <div class="panel"><div class="panel-head"><div class="panel-title">Fiyat Tahminleri</div></div>
+    <div class="chip-grid">
+      ${tahminler.uc_ay ? `<div class="chip"><div class="lab">3 Aylık</div><div class="val up">${escapeHtml(tahminler.uc_ay.fiyat||"—")}</div><div class="muted" style="font-size:11px">${escapeHtml(tahminler.uc_ay.oran||"")}</div></div>` : ""}
+      ${tahminler.bi_sene ? `<div class="chip"><div class="lab">1 Yıllık</div><div class="val up">${escapeHtml(tahminler.bi_sene.fiyat||"—")}</div><div class="muted" style="font-size:11px">${escapeHtml(tahminler.bi_sene.oran||"")}</div></div>` : ""}
+    </div></div>` : "";
+
+  // direncler: dict {fibonacci: [...], hacim: [...]}
+  const direncler = a.direncler || {};
+  const fibList = direncler.fibonacci || [];
+  const hacList = direncler.hacim || [];
+  const dirHtml = (fibList.length || hacList.length) ? `<div style="height:14px"></div>
+    <div class="panel"><div class="panel-head"><div class="panel-title">Destek / Direnç Seviyeleri</div></div>
+    <div class="grid g-2">
+      ${fibList.length ? `<div>
+        <div class="panel-sub-title muted" style="padding:6px 14px 4px;font-size:11px">Fibonacci</div>
+        <table class="tbl">${fibList.map(l => {
+          const isDestek = (l.tur||l.type||"").toLowerCase().includes("destek");
+          return `<tr>
+            <td class="${isDestek?'down':'up'}">${escapeHtml(l.tur||l.type||"")}</td>
+            <td class="num"><b>${fmtNum(l.fiyat,2)}</b></td>
+            <td class="num muted">${escapeHtml(l.degisim||"")}</td>
+          </tr>`;
+        }).join("")}</table></div>` : ""}
+      ${hacList.length ? `<div>
+        <div class="panel-sub-title muted" style="padding:6px 14px 4px;font-size:11px">Hacim Seviyeleri</div>
+        <table class="tbl">${hacList.map(l => {
+          const isDestek = (l.tur||l.type||"").toLowerCase().includes("destek");
+          return `<tr>
+            <td class="${isDestek?'down':'up'}">${escapeHtml(l.tur||l.type||"")}</td>
+            <td class="num"><b>${fmtNum(l.fiyat,2)}</b></td>
+            <td class="num muted">${escapeHtml(l.degisim||"")}</td>
+          </tr>`;
+        }).join("")}</table></div>` : ""}
+    </div></div>` : "";
+
+  // temel_analiz: flat dict of key→value pairs
+  const temelKeys = Object.keys(t).filter(k => !k.includes("Bilgi") && !k.includes("Bilgi"));
+  const temelHtml = temelKeys.length ? `<div style="height:14px"></div>
+    <div class="panel"><div class="panel-head"><div class="panel-title">Temel Analiz & Değerleme</div></div>
+    <div class="chip-grid">${temelKeys.map(k => {
+      const v = t[k];
+      if (v == null || v === "" || v === 0) return "";
+      return `<div class="chip"><div class="lab" style="font-size:10px">${escapeHtml(k)}</div><div class="val">${escapeHtml(typeof v==='object'?JSON.stringify(v).slice(0,40):String(v).slice(0,40))}</div></div>`;
+    }).filter(Boolean).join("")}</div></div>` : "";
+
   body.innerHTML = `
     <div class="grid g-4">
       <div class="kpi"><div class="kpi-label">Risk</div><div class="kpi-val" style="font-size:20px">${escapeHtml(a.risk || "—")}</div></div>
       <div class="kpi"><div class="kpi-label">Pivot</div><div class="kpi-val" style="font-size:20px">${escapeHtml(a.pivot || "—")}</div><div class="kpi-sub muted">${escapeHtml(a.pivot_zaman || "")}</div></div>
-      <div class="kpi"><div class="kpi-label">Stop</div><div class="kpi-val" style="font-size:20px">${escapeHtml(a.stop || "—")}</div></div>
+      <div class="kpi"><div class="kpi-label">Stop</div><div class="kpi-val" style="font-size:20px">${escapeHtml(String(a.stop || "—"))}</div></div>
       <div class="kpi"><div class="kpi-label">Puan</div><div class="kpi-val">${fmtNum(a.puan,2)}</div></div>
     </div>
     <div style="height:14px"></div>
     <div class="grid g-2">
       <div class="panel">
-        <div class="panel-head"><div class="panel-title">Trend Yorumu</div></div>
-        <div style="white-space:pre-line;font-size:13px;line-height:1.7;padding:0 14px 14px">${escapeHtml(trend)}</div>
+        <div class="panel-head"><div class="panel-title">Trend</div></div>
+        <div style="white-space:pre-line;font-size:13px;line-height:1.7;padding:0 14px 14px">${escapeHtml(a.trend || a.gunluk || a.yorum || "—")}</div>
       </div>
       <div class="panel">
         <div class="panel-head"><div class="panel-title">Hareket / Sinyal</div></div>
@@ -1171,27 +1777,17 @@ function renderAnalizTab(body, sym, analiz) {
           <div class="chip"><div class="lab">Hareket</div><div class="val">${escapeHtml(a.hareket||"—")}</div></div>
           <div class="chip"><div class="lab">Sinyal</div><div class="val">${escapeHtml(a.sinyal||"—")}</div></div>
           <div class="chip"><div class="lab">Hacim</div><div class="val">${fmtVol(a.hacim)}</div></div>
-          <div class="chip"><div class="lab">Yukarı %</div><div class="val">${fmtNum(a.upwards,1)}%</div></div>
+          <div class="chip"><div class="lab">Yukarı %</div><div class="val">${a.upwards != null ? fmtNum(a.upwards,1)+"%" : "—"}</div></div>
           <div class="chip"><div class="lab">7G %</div><div class="val ${colorClass(a['7_degisim'])}">${fmtPct(a['7_degisim'])}</div></div>
           <div class="chip"><div class="lab">30G %</div><div class="val ${colorClass(a['30_degisim'])}">${fmtPct(a['30_degisim'])}</div></div>
         </div>
       </div>
     </div>
-    ${sinList.length ? `<div style="height:14px"></div>
-    <div class="panel"><div class="panel-head"><div class="panel-title">Sinyaller</div></div>
-    <ul class="bullet-list up">${sinList.map(s => `<li>${escapeHtml(s)}</li>`).join("")}</ul></div>` : ""}
-    ${tahList.length ? `<div style="height:14px"></div>
-    <div class="panel"><div class="panel-head"><div class="panel-title">Tahminler</div></div>
-    <ul class="bullet-list">${tahList.map(s => `<li>${escapeHtml(s)}</li>`).join("")}</ul></div>` : ""}
-    ${dirList.length ? `<div style="height:14px"></div>
-    <div class="panel"><div class="panel-head"><div class="panel-title">Direnç Bölgeleri</div></div>
-    <ul class="bullet-list">${dirList.map(s => `<li>${escapeHtml(typeof s==='object'?JSON.stringify(s):s)}</li>`).join("")}</ul></div>` : ""}
-    ${Object.keys(t).length ? `<div style="height:14px"></div>
-    <div class="panel"><div class="panel-head"><div class="panel-title">Temel Analiz</div></div>
-    <div class="chip-grid">${Object.entries(t).slice(0,12).map(([k,v]) => `<div class="chip"><div class="lab">${escapeHtml(k)}</div><div class="val">${escapeHtml(typeof v==='object'?JSON.stringify(v).slice(0,40):String(v).slice(0,40))}</div></div>`).join("")}</div></div>` : ""}
-    ${Object.keys(fin).length ? `<div style="height:14px"></div>
-    <div class="panel"><div class="panel-head"><div class="panel-title">Finansallar (özet)</div></div>
-    <div class="chip-grid">${Object.entries(fin).slice(0,12).map(([k,v]) => `<div class="chip"><div class="lab">${escapeHtml(k)}</div><div class="val">${escapeHtml(typeof v==='object'?JSON.stringify(v).slice(0,40):String(v).slice(0,40))}</div></div>`).join("")}</div></div>` : ""}
+    ${tahminHtml}
+    ${tahminlerHtml}
+    ${sinHtml}
+    ${dirHtml}
+    ${temelHtml}
   `;
 }
 
@@ -1291,15 +1887,19 @@ async function renderDerinlikTab(body, sym) {
   let prevPrice = null, prevTradeTime = null, firstLoad = true;
 
   async function refresh() {
+    if (!$("#dr-kpis")) return;
     let r;
     try {
       r = await API(`/api/v1/derinlik?sembol=${encodeURIComponent(sym)}&user_id=${USER_ID}`);
     } catch {
+      if (!$("#dr-kpis")) return;
       if (firstLoad) $("#dr-book").innerHTML = `<div class="error-box">Derinlik verisi alınamadı.</div>`;
       return;
     }
+    // Re-check after async fetch — user may have navigated away
+    if (!$("#dr-kpis")) return;
     if (!r || r.hata) {
-      if (firstLoad) $("#dr-book").innerHTML = `<div class="error-box">Derinlik bulunamadı: ${escapeHtml(r?.hata||'?')}</div>`;
+      if (firstLoad && $("#dr-book")) $("#dr-book").innerHTML = `<div class="error-box">Derinlik bulunamadı: ${escapeHtml(r?.hata||'?')}</div>`;
       return;
     }
 
@@ -1674,34 +2274,1000 @@ async function renderTemettuTab(body, sym) {
   }
 }
 
+/* ───────────── KAP — İçeriden Alım/Satım Bildirimleri ───────────── */
+async function renderKapTab(body, sym) {
+  body.innerHTML = `<div class="loading">KAP bildirimleri çekiliyor…</div>`;
+  try {
+    const [payR, sirketR] = await Promise.all([
+      API(`/api/v1/pay_alim_satim?sembol=${encodeURIComponent(sym)}&user_id=${USER_ID}`).catch(() => null),
+      API(`/api/v1/sirket_bilgileri?sembol=${encodeURIComponent(sym)}&user_id=${USER_ID}`).catch(() => null),
+    ]);
+    const islemler = (payR?.islemler || payR?.veriler || payR?.data || []).slice(0, 80);
+    const sb = sirketR?.sirket_bilgileri || sirketR?.bilgiler || sirketR || {};
+    body.innerHTML = `
+      ${Object.keys(sb).length > 3 ? `<div class="panel" style="margin-bottom:14px">
+        <div class="panel-head"><div class="panel-title">Şirket Bilgileri (KAP)</div></div>
+        <div class="kv">
+          ${sb.ticaret_unvani ? `<div class="k">Unvan</div><div class="v">${escapeHtml(sb.ticaret_unvani)}</div>` : ""}
+          ${sb.merkez ? `<div class="k">Merkez</div><div class="v">${escapeHtml(sb.merkez)}</div>` : ""}
+          ${sb.faaliyet_alani ? `<div class="k">Faaliyet</div><div class="v">${escapeHtml(sb.faaliyet_alani)}</div>` : ""}
+          ${sb.borsaya_giris_tarihi ? `<div class="k">Borsa'ya Giriş</div><div class="v">${escapeHtml(sb.borsaya_giris_tarihi)}</div>` : ""}
+          ${sb.lot_buyuklugu != null ? `<div class="k">Lot Büyüklüğü</div><div class="v">${fmtVol(sb.lot_buyuklugu)}</div>` : ""}
+          ${sb.toplam_hisse != null ? `<div class="k">Toplam Hisse</div><div class="v">${fmtVol(sb.toplam_hisse)}</div>` : ""}
+          ${sb.piyasa_degeri != null ? `<div class="k">Piyasa Değeri</div><div class="v">${fmtVol(sb.piyasa_degeri)}</div>` : ""}
+          ${sb.sermaye != null ? `<div class="k">Sermaye</div><div class="v">${fmtVol(sb.sermaye)}</div>` : ""}
+          ${sb.halka_aciklik_orani != null ? `<div class="k">Halka Açıklık</div><div class="v">${fmtNum(sb.halka_aciklik_orani,2)}%</div>` : ""}
+        </div>
+      </div>` : ""}
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">İçeriden Pay Alım/Satım Bildirimleri (${islemler.length})</div>
+        </div>
+        ${islemler.length ? `<table class="tbl">
+          <tr><th>Tarih</th><th>Kişi / Kurum</th><th>Unvan</th><th>İşlem</th><th class="num">Lot</th><th class="num">Fiyat</th><th class="num">Tutar</th><th class="num">Pay %</th></tr>
+          ${islemler.map(x => {
+            const isSat = (x.islem_turu||x.tip||"").toLowerCase().includes("sat");
+            return `<tr>
+              <td class="muted">${escapeHtml((x.tarih||x.bildirim_tarihi||"").replace("T"," ").slice(0,16))}</td>
+              <td class="sym">${escapeHtml(x.kisi||x.ad_soyad||x.kurum||"")}</td>
+              <td class="muted" style="font-size:10px">${escapeHtml(x.unvan||x.pozisyon||"")}</td>
+              <td><span class="tag ${isSat?'red':'green'}">${escapeHtml(x.islem_turu||x.tip||"")}</span></td>
+              <td class="num">${fmtVol(x.lot||x.adet||x.miktar)}</td>
+              <td class="num">${fmtCurr(x.fiyat,2)}</td>
+              <td class="num">${fmtVol(x.tutar||x.toplam_tutar)}</td>
+              <td class="num">${x.pay_orani!=null?fmtNum(x.pay_orani,4)+"%":"—"}</td>
+            </tr>`;
+          }).join("")}
+        </table>` : `<div class="muted" style="padding:14px">KAP bildirimi bulunamadı.</div>`}
+      </div>
+    `;
+  } catch {
+    body.innerHTML = `<div class="error-box">KAP verisi alınamadı.</div>`;
+  }
+}
+
+/* ───────────── ANALİST — Hedef Fiyat & Tavsiyeler ───────────── */
+async function renderAnalistTab(body, sym) {
+  body.innerHTML = `<div class="loading">Analist tavsiyeleri çekiliyor…</div>`;
+  try {
+    const r = await API(`/api/v1/analist?sembol=${encodeURIComponent(sym)}&user_id=${USER_ID}`);
+    const hedefler = (r?.hedefler || r?.analist_hedefleri || r?.veriler || []).slice(0, 50);
+    const ozet = r?.ozet || r?.tavsiye_ozeti || {};
+    const consensus = r?.consensus || r?.konsensus || {};
+    body.innerHTML = `
+      ${(ozet.al != null || consensus.ortalama_hedef != null) ? `<div class="grid g-4" style="margin-bottom:14px">
+        ${ozet.al != null ? `<div class="kpi"><div class="kpi-label">Al</div><div class="kpi-val up">${ozet.al}</div></div>` : ""}
+        ${ozet.tut != null ? `<div class="kpi"><div class="kpi-label">Tut</div><div class="kpi-val muted">${ozet.tut}</div></div>` : ""}
+        ${ozet.sat != null ? `<div class="kpi"><div class="kpi-label">Sat</div><div class="kpi-val down">${ozet.sat}</div></div>` : ""}
+        ${consensus.ortalama_hedef != null ? `<div class="kpi"><div class="kpi-label">Ort. Hedef</div><div class="kpi-val up">${fmtCurr(consensus.ortalama_hedef,2)}</div><div class="kpi-sub muted">Upside ${fmtPct(consensus.upside)}</div></div>` : ""}
+      </div>` : ""}
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Analist Hedef Fiyatları (${hedefler.length})</div></div>
+        ${hedefler.length ? `<table class="tbl">
+          <tr><th>Tarih</th><th>Kurum / Analist</th><th>Tavsiye</th><th class="num">Hedef Fiyat</th><th class="num">Önceki Hedef</th><th class="num">Upside %</th></tr>
+          ${hedefler.map(x => {
+            const isAl = (x.tavsiye||x.tavsiye_turu||"").toLowerCase().includes("al")||["buy","strong buy","outperform"].includes((x.tavsiye||"").toLowerCase());
+            const isSat = (x.tavsiye||x.tavsiye_turu||"").toLowerCase().includes("sat")||["sell","underperform","reduce"].includes((x.tavsiye||"").toLowerCase());
+            return `<tr>
+              <td class="muted">${escapeHtml((x.tarih||x.rapor_tarihi||"").slice(0,10))}</td>
+              <td class="sym">${escapeHtml(x.kurum||x.analist_kurum||x.kaynak||"")}</td>
+              <td><span class="tag ${isAl?'green':isSat?'red':'amber'}">${escapeHtml(x.tavsiye||x.tavsiye_turu||"Tut")}</span></td>
+              <td class="num up">${fmtCurr(x.hedef_fiyat||x.fiyat,2)}</td>
+              <td class="num muted">${x.onceki_hedef!=null?fmtCurr(x.onceki_hedef,2):"—"}</td>
+              <td class="num ${colorClass(x.upside)}">${x.upside!=null?fmtPct(x.upside):"—"}</td>
+            </tr>`;
+          }).join("")}
+        </table>` : `<div class="muted" style="padding:14px">Analist tavsiyesi bulunamadı.</div>`}
+      </div>
+    `;
+  } catch {
+    body.innerHTML = `<div class="error-box">Analist verisi alınamadı.</div>`;
+  }
+}
+
+/* ───────────── GERİ ALIM — Hisse Geri Alım Programları ───────────── */
+async function renderGeriAlimTab(body, sym) {
+  body.innerHTML = `<div class="loading">Geri alım verileri çekiliyor…</div>`;
+  try {
+    const r = await API(`/api/v1/geri_alimlar?sembol=${encodeURIComponent(sym)}&user_id=${USER_ID}`);
+    const aktif = r?.aktif_program || r?.program || {};
+    const gecmis = (r?.gecmis_islemler || r?.islemler || r?.veriler || []).slice(0, 60);
+    const istatistik = r?.istatistik || r?.ozet || {};
+    body.innerHTML = `
+      ${(aktif.baslangic || aktif.hedef_adet) ? `<div class="panel" style="margin-bottom:14px">
+        <div class="panel-head"><div class="panel-title">Aktif Geri Alım Programı</div></div>
+        <div class="kv">
+          ${aktif.baslangic ? `<div class="k">Başlangıç</div><div class="v">${escapeHtml(aktif.baslangic)}</div>` : ""}
+          ${aktif.bitis ? `<div class="k">Bitiş</div><div class="v">${escapeHtml(aktif.bitis)}</div>` : ""}
+          ${aktif.hedef_adet != null ? `<div class="k">Hedef Adet</div><div class="v">${fmtVol(aktif.hedef_adet)}</div>` : ""}
+          ${aktif.alınan_adet != null ? `<div class="k">Alınan Adet</div><div class="v">${fmtVol(aktif.alinan_adet||aktif.alınan_adet)}</div>` : ""}
+          ${aktif.butce != null ? `<div class="k">Bütçe</div><div class="v">${fmtVol(aktif.butce)}</div>` : ""}
+          ${aktif.harcanan != null ? `<div class="k">Harcanan</div><div class="v">${fmtVol(aktif.harcanan)}</div>` : ""}
+        </div>
+      </div>` : ""}
+      ${Object.keys(istatistik).length > 0 ? `<div class="grid g-4" style="margin-bottom:14px">
+        ${istatistik.toplam_adet != null ? `<div class="kpi"><div class="kpi-label">Toplam Alınan</div><div class="kpi-val">${fmtVol(istatistik.toplam_adet)}</div></div>` : ""}
+        ${istatistik.toplam_tutar != null ? `<div class="kpi"><div class="kpi-label">Toplam Tutar</div><div class="kpi-val">${fmtVol(istatistik.toplam_tutar)}</div></div>` : ""}
+        ${istatistik.ort_maliyet != null ? `<div class="kpi"><div class="kpi-label">Ort. Maliyet</div><div class="kpi-val">${fmtCurr(istatistik.ort_maliyet,2)}</div></div>` : ""}
+        ${istatistik.portfoy_pct != null ? `<div class="kpi"><div class="kpi-label">Portföy %</div><div class="kpi-val">${fmtNum(istatistik.portfoy_pct,2)}%</div></div>` : ""}
+      </div>` : ""}
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Geri Alım İşlemleri (${gecmis.length})</div></div>
+        ${gecmis.length ? `<table class="tbl">
+          <tr><th>Tarih</th><th class="num">Adet</th><th class="num">Fiyat (Ort.)</th><th class="num">Tutar</th><th class="num">Birikimli %</th></tr>
+          ${gecmis.map(x => `<tr>
+            <td class="muted">${escapeHtml((x.tarih||x.islem_tarihi||"").slice(0,10))}</td>
+            <td class="num">${fmtVol(x.adet||x.lot)}</td>
+            <td class="num">${fmtCurr(x.fiyat||x.ort_fiyat,2)}</td>
+            <td class="num">${fmtVol(x.tutar||x.toplam)}</td>
+            <td class="num muted">${x.birikimli_pct!=null?fmtNum(x.birikimli_pct,3)+"%":"—"}</td>
+          </tr>`).join("")}
+        </table>` : `<div class="muted" style="padding:14px">Geri alım işlemi bulunamadı.</div>`}
+      </div>
+    `;
+  } catch {
+    body.innerHTML = `<div class="error-box">Geri alım verisi alınamadı.</div>`;
+  }
+}
+
+/* ───────────── AKIŞ — Sembol Aktivite Akışı ───────────── */
+async function renderAkisTab(body, sym) {
+  body.innerHTML = `<div class="loading">Akış verisi çekiliyor…</div>`;
+  try {
+    const r = await API(`/api/v1/akis?sembol=${encodeURIComponent(sym)}&user_id=${USER_ID}`);
+    const items = (r?.veriler || r?.akis || r?.items || r?.data || []).slice(0, 60);
+    if (!items.length) {
+      body.innerHTML = `<div class="muted" style="padding:14px">Akış verisi yok.</div>`;
+      return;
+    }
+    const typeIcon = (t) => {
+      const tl = (t||"").toLowerCase();
+      if (tl.includes("haber") || tl.includes("news")) return "📰";
+      if (tl.includes("kap") || tl.includes("bildirim")) return "📋";
+      if (tl.includes("analist") || tl.includes("hedef")) return "🎯";
+      if (tl.includes("temett") || tl.includes("temettu")) return "💰";
+      if (tl.includes("genel kurul") || tl.includes("gk")) return "🏛";
+      if (tl.includes("faaliyet") || tl.includes("rapor")) return "📊";
+      return "📌";
+    };
+    body.innerHTML = `<div class="panel">
+      <div class="panel-head"><div class="panel-title">${escapeHtml(sym)} — Aktivite Akışı (${items.length})</div></div>
+      <div class="news-list">${items.map(item => {
+        const baslik = item.baslik || item.title || item.konu || item.subject || "";
+        const icerik = item.icerik || item.content || item.ozet || item.summary || "";
+        const tarih  = item.tarih || item.date || item.created_at || "";
+        const tip    = item.tip || item.type || item.kategori || "";
+        const kaynak = item.kaynak || item.source || "";
+        const url    = item.url || item.link || "";
+        return `<div class="news-card">
+          <div class="news-head">
+            <div class="news-meta">
+              <div class="news-author"><b>${typeIcon(tip)} ${escapeHtml(tip||"Etkinlik")}</b> ${kaynak ? `<span class="muted" style="font-size:11px">— ${escapeHtml(kaynak)}</span>` : ""}</div>
+              <div class="muted" style="font-size:11px">${escapeHtml(tarih.replace("T"," ").slice(0,16))}</div>
+            </div>
+            ${url ? `<a class="btn" href="${escapeHtml(url)}" target="_blank">Aç ↗</a>` : ""}
+          </div>
+          ${baslik ? `<div class="news-body" style="font-weight:600;margin-bottom:4px">${escapeHtml(baslik)}</div>` : ""}
+          ${icerik ? `<div class="news-body muted" style="font-size:12px">${escapeHtml(icerik.slice(0,400))}${icerik.length>400?"…":""}</div>` : ""}
+        </div>`;
+      }).join("")}</div>
+    </div>`;
+  } catch {
+    body.innerHTML = `<div class="error-box">Akış verisi alınamadı.</div>`;
+  }
+}
+
+/* ───────────── KURUMSAL AKD (Piyasa AKD + Kurum Detay) ───────────── */
+async function renderKurumsal(el) {
+  const today = new Date().toISOString().slice(0, 10);
+  const ago30 = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  el.innerHTML = `
+    <div class="tabs scrollx" id="kur-tabs" style="margin-bottom:14px">
+      <span class="tab active" data-kurtab="piyasa">Piyasa AKD</span>
+      <span class="tab" data-kurtab="kurum">Kurum Detay</span>
+    </div>
+    <div id="kur-body"></div>
+  `;
+  let activeKurTab = "piyasa";
+  $$(".tab", $("#kur-tabs")).forEach(t => t.onclick = () => {
+    activeKurTab = t.dataset.kurtab;
+    $$(".tab", $("#kur-tabs")).forEach(x => x.classList.toggle("active", x === t));
+    renderKurTab();
+  });
+
+  function renderKurTab() {
+    if (activeKurTab === "piyasa") renderPiyasaAkd($("#kur-body"));
+    else renderKurumDetay($("#kur-body"));
+  }
+  renderKurTab();
+}
+
+async function renderPiyasaAkd(el) {
+  const today = new Date().toISOString().slice(0, 10);
+  const ago30 = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  el.innerHTML = `
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <div class="panel-title">Piyasa Geneli AKD</div>
+        <div class="panel-actions">
+          <input type="date" id="pakd-ilk" value="${ago30}" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:4px 8px;color:var(--text);font-size:11px">
+          <input type="date" id="pakd-son" value="${today}" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:4px 8px;color:var(--text);font-size:11px">
+          <button class="btn primary" id="pakd-go">Getir</button>
+        </div>
+      </div>
+    </div>
+    <div id="pakd-results"><div class="muted" style="padding:14px">Tarih aralığı seçip "Getir"e tıklayın.</div></div>
+  `;
+  $("#pakd-go").onclick = async () => {
+    const ilk = $("#pakd-ilk").value;
+    const son = $("#pakd-son").value;
+    const res = $("#pakd-results");
+    res.innerHTML = `<div class="loading">Piyasa AKD verileri alınıyor…</div>`;
+    try {
+      const r = await API(`/api/v1/piyasa_akd?ilk=${ilk}&son=${son}&user_id=${USER_ID}`);
+      const kurumlar = r?.kurumlar || r?.veriler || r?.data || [];
+      if (!kurumlar.length) { res.innerHTML = `<div class="muted" style="padding:14px">Bu aralık için veri yok.</div>`; return; }
+      res.innerHTML = `<div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">Piyasa AKD — ${escapeHtml(r?.ilk||ilk)} / ${escapeHtml(r?.son||son)}</div>
+          <div class="muted small">${kurumlar.length} kurum</div>
+        </div>
+        <table class="tbl">
+          <tr>
+            <th>Kurum</th>
+            <th class="num">Net (TL)</th>
+            <th class="num">Alış (TL)</th>
+            <th class="num">Satış (TL)</th>
+            <th class="num">Hisse Sayısı</th>
+            <th class="num">Oran %</th>
+          </tr>
+          ${kurumlar.map(k => {
+            const net = k.net ?? k.net_tl ?? k.net_lot ?? 0;
+            return `<tr>
+              <td class="sym">${escapeHtml(k.kurum||k.kod||k.kodu||"")}</td>
+              <td class="num ${colorClass(net)}">${fmtVol(net)}</td>
+              <td class="num up">${fmtVol(k.alis||k.alis_tl||k.alish||0)}</td>
+              <td class="num down">${fmtVol(k.satis||k.satis_tl||k.satish||0)}</td>
+              <td class="num">${k.hisse_sayisi??k.hisse_sayi??k.sayi??"-"}</td>
+              <td class="num">${k.oran!=null?fmtNum(k.oran,2)+"%":"—"}</td>
+            </tr>`;
+          }).join("")}
+        </table>
+      </div>`;
+    } catch {
+      res.innerHTML = `<div class="error-box">Piyasa AKD verisi alınamadı.</div>`;
+    }
+  };
+}
+
+async function renderKurumDetay(el) {
+  const today = new Date().toISOString().slice(0, 10);
+  const ago30 = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  el.innerHTML = `
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <div class="panel-title">Aracı Kurum Detay</div>
+        <div class="panel-actions" style="flex-wrap:wrap;gap:6px">
+          <input id="kd-kurum" placeholder="Kurum kodu (örn. IS)" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:4px 8px;color:var(--text);font-size:11px;width:120px">
+          <input type="date" id="kd-ilk" value="${ago30}" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:4px 8px;color:var(--text);font-size:11px">
+          <input type="date" id="kd-son" value="${today}" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:4px 8px;color:var(--text);font-size:11px">
+          <button class="btn primary" id="kd-go">Getir</button>
+        </div>
+      </div>
+    </div>
+    <div id="kd-results"><div class="muted" style="padding:14px">Kurum kodu ve tarih aralığı seçip "Getir"e tıklayın.</div></div>
+  `;
+  $("#kd-go").onclick = async () => {
+    const kurum = $("#kd-kurum").value.trim().toUpperCase();
+    const ilk = $("#kd-ilk").value;
+    const son = $("#kd-son").value;
+    const res = $("#kd-results");
+    if (!kurum) { res.innerHTML = `<div class="error-box">Kurum kodu giriniz.</div>`; return; }
+    res.innerHTML = `<div class="loading">Kurum AKD verisi alınıyor…</div>`;
+    try {
+      const r = await API(`/api/v1/kurum_akd?kurum=${encodeURIComponent(kurum)}&ilk=${ilk}&son=${son}&user_id=${USER_ID}`);
+      const veriler = r?.veriler || r?.data || [];
+      const grafik  = r?.grafik  || [];
+      res.innerHTML = `
+        <div class="grid g-4" style="margin-bottom:14px">
+          <div class="kpi"><div class="kpi-label">Kurum</div><div class="kpi-val">${escapeHtml(r?.kurum_ad||r?.kurum||kurum)}</div></div>
+          <div class="kpi"><div class="kpi-label">Dönem</div><div class="kpi-val" style="font-size:12px">${escapeHtml(r?.ilk||ilk)} – ${escapeHtml(r?.son||son)}</div></div>
+          <div class="kpi"><div class="kpi-label">Hisse Sayısı</div><div class="kpi-val">${r?.hisse_sayisi??"-"}</div></div>
+          <div class="kpi"><div class="kpi-label">Kayıt Sayısı</div><div class="kpi-val">${veriler.length}</div></div>
+        </div>
+        ${veriler.length ? `<div class="panel">
+          <div class="panel-head"><div class="panel-title">${escapeHtml(r?.kurum_ad||kurum)} — Hisse Pozisyonları</div></div>
+          <div style="max-height:480px;overflow:auto"><table class="tbl">
+            <tr><th>Sembol</th><th class="num">Net (Lot)</th><th class="num">Alış</th><th class="num">Satış</th><th class="num">Maliyet</th><th class="num">Pay %</th></tr>
+            ${veriler.map(v => {
+              const net = v.net??v.net_lot??v.net_tl??0;
+              return `<tr class="clickable" onclick="navTo('symbol','${escapeHtml(v.sembol||"")}')">
+                <td class="sym">${escapeHtml(v.sembol||"")}</td>
+                <td class="num ${colorClass(net)}">${fmtVol(net)}</td>
+                <td class="num up">${fmtVol(v.alis??v.alis_lot??0)}</td>
+                <td class="num down">${fmtVol(v.satis??v.satis_lot??0)}</td>
+                <td class="num">${v.maliyet!=null?fmtCurr(v.maliyet,2):"—"}</td>
+                <td class="num">${v.oran!=null?fmtNum(v.oran,2)+"%":"—"}</td>
+              </tr>`;
+            }).join("")}
+          </table></div>
+        </div>` : `<div class="muted" style="padding:14px">Bu kurum için veri yok.</div>`}
+      `;
+    } catch {
+      res.innerHTML = `<div class="error-box">Kurum AKD verisi alınamadı.</div>`;
+    }
+  };
+}
+
+/* ───────────── TAKAS TARAMA (analiztakas) ───────────── */
+async function renderTakasAnaliz(el) {
+  const today = new Date().toISOString().slice(0, 10);
+  const ago7  = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
+  el.innerHTML = `
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <div class="panel-title">Piyasa Geneli Kurum Takas Taraması</div>
+        <div class="panel-actions" style="flex-wrap:wrap;gap:6px">
+          <input type="date" id="ta-ilk" value="${ago7}" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:4px 8px;color:var(--text);font-size:11px">
+          <input type="date" id="ta-son" value="${today}" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:4px 8px;color:var(--text);font-size:11px">
+          <button class="btn primary" id="ta-go">Tara</button>
+        </div>
+      </div>
+      <div style="padding:0 14px 10px">
+        <input id="ta-filter" placeholder="Sembol filtrele…" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:5px 8px;color:var(--text);font-size:11px;width:200px">
+      </div>
+    </div>
+    <div id="ta-results"><div class="muted" style="padding:14px">Tarih aralığı seçip "Tara"ya tıklayın.</div></div>
+  `;
+  let taAllData = [];
+  $("#ta-go").onclick = async () => {
+    const ilk = $("#ta-ilk").value;
+    const son = $("#ta-son").value;
+    const res = $("#ta-results");
+    res.innerHTML = `<div class="loading">Takas taraması yapılıyor…</div>`;
+    try {
+      const r = await API(`/api/v1/analiztakas?ilk=${ilk}&son=${son}&user_id=${USER_ID}`);
+      taAllData = Array.isArray(r) ? r : (r?.veriler || r?.data || r?.semboller || []);
+      renderTaFiltered();
+    } catch {
+      res.innerHTML = `<div class="error-box">Takas tarama verisi alınamadı.</div>`;
+    }
+  };
+  $("#ta-filter").addEventListener("input", renderTaFiltered);
+
+  function renderTaFiltered() {
+    const res = $("#ta-results");
+    if (!res) return;
+    if (!taAllData.length) { res.innerHTML = `<div class="muted" style="padding:14px">Veri yok.</div>`; return; }
+    const filterEl = $("#ta-filter");
+    const q = (filterEl ? filterEl.value : "").toUpperCase().trim();
+    const rows = taAllData.filter(x => !q || (x.sembol||"").toUpperCase().includes(q));
+    res.innerHTML = `<div class="panel">
+      <div class="panel-head">
+        <div class="panel-title">Takas Tarama Sonuçları</div>
+        <div class="muted small">${rows.length} sembol</div>
+      </div>
+      <div style="max-height:600px;overflow:auto"><table class="tbl">
+        <tr>
+          <th>Sembol</th>
+          <th class="num">Fiyat</th>
+          <th class="num">Değ %</th>
+          <th class="num">Hacim</th>
+          <th class="num">Puan</th>
+          <th>Trend</th>
+          <th>Sinyal</th>
+          <th>Risk</th>
+          <th>Hareket</th>
+        </tr>
+        ${rows.map(x => {
+          const a = x.analiz || x;
+          const sinyal = a.sinyal || a.sinyaller?.[0] || "";
+          const trend  = a.trend  || "";
+          const risk   = a.risk   || "";
+          const hareket = a.hareket;
+          const puan   = a.puan ?? a.skor ?? null;
+          return `<tr class="clickable" onclick="navTo('symbol','${escapeHtml(x.sembol||"")}')">
+            <td class="sym">${escapeHtml(x.sembol||"")}</td>
+            <td class="num">${fmtCurr(x.fiyat,2)}</td>
+            <td class="num pct ${colorClass(x.degisim)}">${fmtPct(x.degisim)}</td>
+            <td class="num">${fmtVol(x.hacim)}</td>
+            <td class="num">${puan!=null?fmtNum(puan,1):"—"}</td>
+            <td><span class="tag ${trend.toLowerCase().includes("yük")||trend.toLowerCase().includes("al")?"green":trend.toLowerCase().includes("düş")||trend.toLowerCase().includes("sat")?"red":"amber"}">${escapeHtml(trend||"—")}</span></td>
+            <td style="font-size:11px">${escapeHtml(String(sinyal||"—").slice(0,30))}</td>
+            <td><span class="tag ${risk.toLowerCase().includes("yük")?"red":risk.toLowerCase().includes("düş")?"green":"amber"}">${escapeHtml(risk||"—")}</span></td>
+            <td class="num ${colorClass(hareket)}">${hareket!=null?fmtPct(hareket):"—"}</td>
+          </tr>`;
+        }).join("")}
+      </table></div>
+    </div>`;
+  }
+}
+
+/* ───────────── KAP PAY (Tüm Piyasa İçeriden Alım/Satım) ───────────── */
+async function renderKapPay(el) {
+  const today = new Date().toISOString().slice(0, 10);
+  const ago30 = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  el.innerHTML = `
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <div class="panel-title">KAP Pay Bildirimleri — Tüm Piyasa</div>
+        <div class="panel-actions" style="flex-wrap:wrap;gap:6px">
+          <input type="date" id="kp-ilk" value="${ago30}" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:4px 8px;color:var(--text);font-size:11px">
+          <input type="date" id="kp-son" value="${today}" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:4px 8px;color:var(--text);font-size:11px">
+          <button class="btn primary" id="kp-go">Getir</button>
+        </div>
+      </div>
+      <div style="padding:0 14px 10px;display:flex;gap:8px;flex-wrap:wrap">
+        <input id="kp-filter" placeholder="Sembol / kişi filtrele…" style="background:var(--panel-2);border:1px solid var(--border-2);border-radius:5px;padding:5px 8px;color:var(--text);font-size:11px;width:220px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-dim)">
+          <input type="checkbox" id="kp-only-buy"> Sadece Alış
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-dim)">
+          <input type="checkbox" id="kp-only-sell"> Sadece Satış
+        </label>
+      </div>
+    </div>
+    <div id="kp-results"><div class="muted" style="padding:14px">Tarih aralığı seçip "Getir"e tıklayın.</div></div>
+  `;
+  let kpAllData = [];
+  $("#kp-go").onclick = async () => {
+    const ilk = $("#kp-ilk").value;
+    const son = $("#kp-son").value;
+    const res = $("#kp-results");
+    res.innerHTML = `<div class="loading">KAP bildirimleri alınıyor…</div>`;
+    try {
+      const r = await API(`/api/v1/tum_pay_alim_satim?ilk=${ilk}&son=${son}&user_id=${USER_ID}`);
+      kpAllData = r?.veriler || r?.islemler || r?.data || [];
+      if (!kpAllData.length && Array.isArray(r)) kpAllData = r;
+      renderKpFiltered();
+    } catch {
+      res.innerHTML = `<div class="error-box">KAP verisi alınamadı.</div>`;
+    }
+  };
+  $("#kp-filter").addEventListener("input", renderKpFiltered);
+  $("#kp-only-buy").addEventListener("change", renderKpFiltered);
+  $("#kp-only-sell").addEventListener("change", renderKpFiltered);
+
+  function renderKpFiltered() {
+    const res = $("#kp-results");
+    if (!res) return;
+    if (!kpAllData.length) { res.innerHTML = `<div class="muted" style="padding:14px">Veri yok.</div>`; return; }
+    const kpFilter = $("#kp-filter"), kpBuy = $("#kp-only-buy"), kpSell = $("#kp-only-sell");
+    const q     = (kpFilter ? kpFilter.value : "").toUpperCase().trim();
+    const onBuy  = kpBuy ? kpBuy.checked : false;
+    const onSell = kpSell ? kpSell.checked : false;
+    let rows = kpAllData.filter(x => {
+      if (q) {
+        const sym  = (x.sembol||x.hisse||"").toUpperCase();
+        const kisi = (x.kisi||x.ad_soyad||x.ad||"").toUpperCase();
+        if (!sym.includes(q) && !kisi.includes(q)) return false;
+      }
+      const isSat = (x.islem_turu||x.tip||"").toLowerCase().includes("sat");
+      if (onBuy  && isSat)  return false;
+      if (onSell && !isSat) return false;
+      return true;
+    }).slice(0, 500);
+    const totalAlis = kpAllData.filter(x => !(x.islem_turu||x.tip||"").toLowerCase().includes("sat")).length;
+    const totalSat  = kpAllData.length - totalAlis;
+    res.innerHTML = `
+      <div class="grid g-4" style="margin-bottom:14px">
+        <div class="kpi"><div class="kpi-label">Toplam Bildirim</div><div class="kpi-val">${kpAllData.length}</div></div>
+        <div class="kpi"><div class="kpi-label">Alış</div><div class="kpi-val up">${totalAlis}</div></div>
+        <div class="kpi"><div class="kpi-label">Satış</div><div class="kpi-val down">${totalSat}</div></div>
+        <div class="kpi"><div class="kpi-label">Gösterilen</div><div class="kpi-val">${rows.length}</div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">İçeriden Pay Alım/Satım Bildirimleri</div></div>
+        ${rows.length ? `<div style="max-height:560px;overflow:auto"><table class="tbl">
+          <tr><th>Tarih</th><th>Sembol</th><th>Kişi / Kurum</th><th>Unvan</th><th>İşlem</th><th class="num">Lot</th><th class="num">Fiyat</th><th class="num">Tutar</th><th class="num">Pay %</th></tr>
+          ${rows.map(x => {
+            const isSat = (x.islem_turu||x.tip||"").toLowerCase().includes("sat");
+            return `<tr class="clickable" onclick="navTo('symbol','${escapeHtml(x.sembol||x.hisse||"")}')">
+              <td class="muted">${escapeHtml((x.tarih||x.bildirim_tarihi||x.islem_tarihi||"").replace("T"," ").slice(0,16))}</td>
+              <td class="sym">${escapeHtml(x.sembol||x.hisse||"")}</td>
+              <td class="sym">${escapeHtml(x.kisi||x.ad_soyad||x.ad||x.kurum||"")}</td>
+              <td class="muted" style="font-size:10px">${escapeHtml(x.unvan||x.pozisyon||x.gorev||"")}</td>
+              <td><span class="tag ${isSat?"red":"green"}">${escapeHtml(x.islem_turu||x.tip||"")}</span></td>
+              <td class="num">${fmtVol(x.lot||x.adet||x.miktar)}</td>
+              <td class="num">${fmtCurr(x.fiyat,2)}</td>
+              <td class="num">${fmtVol(x.tutar||x.toplam_tutar||x.toplam)}</td>
+              <td class="num">${x.pay_orani!=null?fmtNum(x.pay_orani,4)+"%":x.oran!=null?fmtNum(x.oran,4)+"%":"—"}</td>
+            </tr>`;
+          }).join("")}
+        </table></div>` : `<div class="muted" style="padding:14px">Eşleşen bildirim yok.</div>`}
+      </div>
+    `;
+  }
+}
+
 /* ───────────── GLOBAL SEARCH ───────────── */
 function setupSearch() {
   const inp = $("#global-search"), res = $("#search-results");
-  let timer;
+  let timer, activeIdx = -1;
+
   inp.addEventListener("input", () => {
+    activeIdx = -1;
     clearTimeout(timer);
-    timer = setTimeout(doSearch, 120);
+    timer = setTimeout(doSearch, 80);
   });
   inp.addEventListener("focus", doSearch);
   document.addEventListener("click", (e) => {
-    if (!e.target.closest(".search-wrap")) res.classList.add("hidden");
+    if (!e.target.closest(".search-wrap")) { res.classList.add("hidden"); activeIdx = -1; }
   });
+
   function doSearch() {
     const q = inp.value.toUpperCase().trim();
     if (!q) { res.classList.add("hidden"); return; }
-    const matches = state.symbols.filter(s => s.startsWith(q)).slice(0, 50);
-    if (!matches.length) { res.innerHTML = `<div class="row muted">Eşleşme yok.</div>`; res.classList.remove("hidden"); return; }
-    res.innerHTML = matches.map(s => `<div class="row" onclick="navTo('symbol','${escapeHtml(s)}');document.getElementById('global-search').value='';document.getElementById('search-results').classList.add('hidden')">
-      <span class="sym">${escapeHtml(s)}</span><span class="muted">↗</span>
-    </div>`).join("");
+    const syms = state.symbols;
+    // prioritise prefix matches, then include any contains match
+    const prefix  = syms.filter(s => s.startsWith(q));
+    const contain = syms.filter(s => !s.startsWith(q) && s.includes(q));
+    const matches = [...prefix, ...contain].slice(0, 40);
+    if (!matches.length) {
+      res.innerHTML = `<div class="row"><span class="muted">Sembol bulunamadı: <b>${escapeHtml(q)}</b></span></div>`;
+      res.classList.remove("hidden");
+      return;
+    }
+    res.innerHTML = matches.map((s, i) => {
+      const pData = state.prices[s];
+      const priceHtml = pData?.fiyat != null
+        ? `<span class="mono" style="font-size:11.5px;color:var(--text-dim)">${fmtCurr(pData.fiyat,2)} <span class="${colorClass(pData.degisim)}">${fmtPct(pData.degisim)}</span></span>`
+        : `<span class="muted" style="font-size:11px">↗</span>`;
+      return `<div class="row${i===activeIdx?' active':''}" data-sr-idx="${i}"
+        onclick="navTo('symbol','${escapeHtml(s)}');document.getElementById('global-search').value='';document.getElementById('search-results').classList.add('hidden')">
+        <span class="sym">${escapeHtml(s)}</span>
+        ${priceHtml}
+      </div>`;
+    }).join("");
     res.classList.remove("hidden");
   }
+
   inp.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
+    const rows = $$(".row", res);
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      activeIdx = Math.min(activeIdx + 1, rows.length - 1);
+      rows.forEach((r, i) => r.classList.toggle("active", i === activeIdx));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      activeIdx = Math.max(activeIdx - 1, 0);
+      rows.forEach((r, i) => r.classList.toggle("active", i === activeIdx));
+    } else if (e.key === "Enter") {
       const q = inp.value.toUpperCase().trim();
-      if (q) { navTo("symbol", q); inp.value = ""; res.classList.add("hidden"); }
+      const activeRow = rows[activeIdx];
+      if (activeRow) { activeRow.click(); }
+      else if (q) { navTo("symbol", q); inp.value = ""; res.classList.add("hidden"); }
+    } else if (e.key === "Escape") {
+      res.classList.add("hidden"); inp.blur();
     }
   });
+
+  // "/" shortcut to focus search from anywhere
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "/" && document.activeElement !== inp &&
+        !["INPUT","TEXTAREA","SELECT"].includes(document.activeElement?.tagName)) {
+      e.preventDefault();
+      inp.focus();
+      inp.select();
+    }
+  });
+}
+
+/* ═══════════════════════════════════════════════════════
+   LOCALSTORAGE HELPERS
+   ═══════════════════════════════════════════════════════ */
+
+// ── Portfolio ──
+function getPortfolio() { try { return JSON.parse(localStorage.getItem("hp.portfolio") || "[]"); } catch { return []; } }
+function savePortfolio(p) { localStorage.setItem("hp.portfolio", JSON.stringify(p)); updatePortfolioBadge(); }
+function updatePortfolioBadge() {
+  const p = getPortfolio();
+  const badge = document.getElementById("portfolio-badge");
+  if (!badge) return;
+  if (p.length) { badge.textContent = p.length; badge.style.display = ""; }
+  else badge.style.display = "none";
+}
+
+// ── Recent Symbols ──
+function trackRecent(sym) {
+  try {
+    let recent = JSON.parse(localStorage.getItem("hp.recent") || "[]");
+    recent = [sym, ...recent.filter(s => s !== sym)].slice(0, 10);
+    localStorage.setItem("hp.recent", JSON.stringify(recent));
+    updateRecentSidebar();
+  } catch {/**/}
+}
+function getRecent() { try { return JSON.parse(localStorage.getItem("hp.recent") || "[]"); } catch { return []; } }
+function updateRecentSidebar() {
+  const recent = getRecent();
+  const section = document.getElementById("recent-section");
+  const list = document.getElementById("recent-list");
+  if (!section || !list) return;
+  if (!recent.length) { section.style.display = "none"; return; }
+  section.style.display = "";
+  list.innerHTML = recent.map(s => {
+    const p = state.prices[s];
+    const px = p?.fiyat != null ? fmtCurr(p.fiyat, 2) : "";
+    const chg = p?.degisim != null
+      ? `<span class="${colorClass(p.degisim)}" style="font-size:9px">${fmtPct(p.degisim)}</span>` : "";
+    return `<div class="recent-sym-item" onclick="navTo('symbol','${escapeHtml(s)}')">
+      <span class="sym">${escapeHtml(s)}</span>
+      <span class="rpx">${px} ${chg}</span>
+    </div>`;
+  }).join("");
+}
+
+// ── Notes ──
+function getNotes(sym) { return localStorage.getItem(`hp.notes.${sym}`) || ""; }
+function setNotes(sym, txt) { localStorage.setItem(`hp.notes.${sym}`, txt); }
+
+// ── Local Alarms ──
+function getLocalAlarms() { try { return JSON.parse(localStorage.getItem("hp.alarms") || "[]"); } catch { return []; } }
+function saveLocalAlarms(a) { localStorage.setItem("hp.alarms", JSON.stringify(a)); updateAlarmsBadge(); }
+function addLocalAlarm(sembol, tip, fiyat, note) {
+  const alarms = getLocalAlarms();
+  alarms.push({ id: Date.now(), sembol: sembol.toUpperCase(), tip, fiyat: parseFloat(fiyat), note: note || "", aktif: true, triggered: false, createdAt: new Date().toISOString() });
+  saveLocalAlarms(alarms);
+}
+function removeLocalAlarm(id) { saveLocalAlarms(getLocalAlarms().filter(a => a.id !== id)); }
+function updateAlarmsBadge() {
+  const active = getLocalAlarms().filter(a => a.aktif && !a.triggered).length;
+  const badge = document.getElementById("alarms-badge");
+  if (!badge) return;
+  if (active) { badge.textContent = active; badge.style.display = ""; }
+  else badge.style.display = "none";
+}
+
+/* ═══════════════════════════════════════════════════════
+   MARKET STATUS
+   ═══════════════════════════════════════════════════════ */
+function getMarketStatus() {
+  const istanbul = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Istanbul" }));
+  const day  = istanbul.getDay(); // 0=Sun, 6=Sat
+  const mins = istanbul.getHours() * 60 + istanbul.getMinutes();
+  const isWeekday = day >= 1 && day <= 5;
+  if (!isWeekday)                        return { status: "closed", label: "KAPALI" };
+  if (mins >= 570  && mins < 600)        return { status: "pre",    label: "SEANS ÖNCESİ" };
+  if (mins >= 600  && mins < 1080)       return { status: "open",   label: "AÇIK" };
+  if (mins >= 1080 && mins < 1090)       return { status: "pre",    label: "KAPANIYOR" };
+  return { status: "closed", label: "KAPALI" };
+}
+function updateMarketBadge() {
+  const badge = document.getElementById("market-status");
+  if (!badge) return;
+  const { status, label } = getMarketStatus();
+  badge.className = `market-badge ${status}`;
+  badge.textContent = `BIST ${label}`;
+}
+
+/* ═══════════════════════════════════════════════════════
+   ALARM CHECKER (runs every 30s in background)
+   ═══════════════════════════════════════════════════════ */
+async function checkAlarms() {
+  const alarms = getLocalAlarms().filter(a => a.aktif && !a.triggered);
+  if (!alarms.length) return;
+  const syms = [...new Set(alarms.map(a => a.sembol))];
+  try {
+    const r = await API(`/api/v1/fiyatlar?semboller=${syms.join(",")}&user_id=${USER_ID}`);
+    const fiyatlar = r?.fiyatlar || {};
+    const all = getLocalAlarms();
+    let changed = false;
+    all.forEach(alarm => {
+      if (!alarm.aktif || alarm.triggered) return;
+      const fiyat = fiyatlar[alarm.sembol]?.fiyat;
+      if (fiyat == null) return;
+      const triggered = alarm.tip === "above" ? fiyat >= alarm.fiyat : fiyat <= alarm.fiyat;
+      if (triggered) {
+        alarm.triggered = true;
+        alarm.triggeredAt = new Date().toISOString();
+        alarm.triggeredPrice = fiyat;
+        changed = true;
+        if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+          new Notification(`Alarm: ${alarm.sembol}`, {
+            body: `${alarm.sembol} ${alarm.tip === "above" ? "≥" : "≤"} ₺${alarm.fiyat} — Güncel: ₺${fiyat.toFixed(2)}`,
+            icon: "/favicon.ico",
+          });
+        }
+      }
+    });
+    if (changed) saveLocalAlarms(all);
+  } catch {/**/}
+}
+
+/* ═══════════════════════════════════════════════════════
+   CANDLESTICK CHART
+   ═══════════════════════════════════════════════════════ */
+function svgCandleChart(t, o, h, l, c) {
+  const W = 800, H = 320, padL = 52, padR = 20, padT = 16, padB = 28;
+  const min = Math.min(...l), max = Math.max(...h);
+  const range = (max - min) || 1;
+  const n = t.length;
+  const chartW = W - padL - padR;
+  const barW = Math.max(1, Math.floor(chartW / n * 0.65));
+  const toY = v => padT + (1 - (v - min) / range) * (H - padT - padB);
+  const toX = i => padL + (i + 0.5) * chartW / n;
+  const labels = [];
+  for (let i = 0; i <= 4; i++) {
+    const v = max - (range * i / 4);
+    const y = padT + (i / 4) * (H - padT - padB);
+    labels.push(`<text x="${padL-6}" y="${y+4}" fill="#5b6573" font-size="10" text-anchor="end" font-family="ui-monospace">${v.toFixed(2)}</text>
+                 <line x1="${padL}" x2="${W-padR}" y1="${y}" y2="${y}" stroke="#1b232f" stroke-dasharray="2,3"/>`);
+  }
+  const fmtDate = ts => new Date(ts*1000).toLocaleDateString("tr-TR", { day:"2-digit", month:"short" });
+  const xIdxs = [0, Math.floor(n/4), Math.floor(n/2), Math.floor(n*3/4), n-1];
+  const xLabels = xIdxs.map(i => `<text x="${toX(i)}" y="${H-8}" fill="#5b6573" font-size="10" text-anchor="middle" font-family="ui-monospace">${fmtDate(t[i])}</text>`).join("");
+  const candles = t.map((_, i) => {
+    const x = toX(i);
+    const isUp = c[i] >= o[i];
+    const color = isUp ? "#2ec27e" : "#ff4757";
+    const openY = toY(o[i]), closeY = toY(c[i]), highY = toY(h[i]), lowY = toY(l[i]);
+    const bodyTop = Math.min(openY, closeY);
+    const bodyH = Math.max(1, Math.abs(openY - closeY));
+    return `<line x1="${x}" x2="${x}" y1="${highY}" y2="${lowY}" stroke="${color}" stroke-width="1"/>
+            <rect x="${x - barW/2}" y="${bodyTop}" width="${barW}" height="${bodyH}" fill="${color}" rx="0.5"/>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    ${labels.join("")}
+    ${candles}
+    ${xLabels}
+  </svg>`;
+}
+
+/* ═══════════════════════════════════════════════════════
+   PORTFOLIO PAGE
+   ═══════════════════════════════════════════════════════ */
+async function renderPortfolio(el) {
+  el.innerHTML = `
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">Pozisyon Ekle</div></div>
+      <div style="padding:12px 16px">
+        <div class="pf-add-form">
+          <input id="pf-sym"   type="text"   placeholder="Sembol" maxlength="10" class="sym-inp">
+          <input id="pf-adet"  type="number" placeholder="Adet"   min="0.0001" step="any" class="num-inp">
+          <input id="pf-fiyat" type="number" placeholder="Alış Fiyatı (₺)" step="0.0001" class="num-inp">
+          <input id="pf-not"   type="text"   placeholder="Not (opsiyonel)" style="flex:1;min-width:120px">
+          <button class="btn primary" onclick="pfAdd()">+ Ekle</button>
+        </div>
+        <div id="pf-form-err" style="color:var(--red);font-size:12px;min-height:16px"></div>
+      </div>
+    </div>
+    <div id="pf-summary" class="pf-kpi-row" style="margin-bottom:14px"></div>
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title">Pozisyonlar</div>
+        <div class="panel-actions"><button class="btn" id="pf-refresh-btn">↻ Güncelle</button></div>
+      </div>
+      <div id="pf-body" class="loading">…</div>
+    </div>
+  `;
+  const pfSymInp = document.getElementById("pf-sym");
+  if (pfSymInp) pfSymInp.addEventListener("keyup", e => { e.target.value = e.target.value.toUpperCase(); });
+  document.getElementById("pf-refresh-btn").onclick = () => loadPf();
+
+  async function loadPf() {
+    const positions = getPortfolio();
+    const pfBody = document.getElementById("pf-body");
+    const pfSum  = document.getElementById("pf-summary");
+    if (!pfBody) return;
+    if (!positions.length) {
+      pfBody.innerHTML = `<div class="muted" style="padding:16px 20px">Henüz pozisyon eklenmemiş. Yukarıdan ekleyebilirsiniz.</div>`;
+      if (pfSum) pfSum.innerHTML = "";
+      return;
+    }
+    pfBody.innerHTML = `<div class="loading" style="padding:16px">Fiyatlar alınıyor…</div>`;
+    const syms = [...new Set(positions.map(p => p.sembol))];
+    let fiyatlar = {};
+    try {
+      const r = await API(`/api/v1/fiyatlar?semboller=${syms.join(",")}&user_id=${USER_ID}`);
+      fiyatlar = r?.fiyatlar || {};
+    } catch {/**/}
+    if (!document.getElementById("pf-body")) return;
+
+    let totalCost = 0, totalValue = 0;
+    const rows = positions.map(pos => {
+      const fData = fiyatlar[pos.sembol] || {};
+      const guncel = fData.fiyat ?? null;
+      const maliyet = pos.adet * pos.alisFiyati;
+      const guncelDeger = guncel != null ? pos.adet * guncel : null;
+      const kz  = guncelDeger != null ? guncelDeger - maliyet : null;
+      const kzPct = kz != null ? (kz / maliyet) * 100 : null;
+      totalCost += maliyet;
+      if (guncelDeger != null) totalValue += guncelDeger;
+      return { pos, guncel, maliyet, guncelDeger, kz, kzPct, degisim: fData.degisim };
+    });
+
+    const totalKZ = totalValue - totalCost;
+    const totalKZPct = totalCost > 0 ? (totalKZ / totalCost) * 100 : 0;
+    if (pfSum) pfSum.innerHTML = [
+      ["Toplam Maliyet",  fmtCurr(totalCost,0),  ""],
+      ["Güncel Değer",    fmtCurr(totalValue,0), ""],
+      ["Kâr / Zarar",    `${totalKZ>=0?"+":""}${fmtCurr(totalKZ,0)}`, colorClass(totalKZ)],
+      ["K/Z %",           fmtPct(totalKZPct),    colorClass(totalKZPct)],
+    ].map(([lab,val,cls]) => `<div class="kpi"><div class="kpi-label">${lab}</div><div class="kpi-val ${cls}">${val}</div></div>`).join("");
+
+    const head = `<tr>
+      <th>Sembol</th><th>Not</th><th class="num">Adet</th>
+      <th class="num">Alış</th><th class="num">Güncel</th><th class="num">Gün Değ</th>
+      <th class="num">Maliyet</th><th class="num">G.Değer</th>
+      <th class="num">K/Z (₺)</th><th class="num">K/Z %</th><th class="num">Ağırlık</th>
+      <th></th>
+    </tr>`;
+    const tbody = rows.map(({ pos, guncel, maliyet, guncelDeger, kz, kzPct, degisim }) => {
+      const weight = totalValue > 0 && guncelDeger != null ? (guncelDeger / totalValue * 100) : null;
+      return `<tr>
+        <td class="sym clickable" onclick="navTo('symbol','${escapeHtml(pos.sembol)}')">${escapeHtml(pos.sembol)}</td>
+        <td class="muted" style="font-size:11px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(pos.not||"")}</td>
+        <td class="num">${fmtNum(pos.adet, pos.adet % 1 !== 0 ? 4 : 0)}</td>
+        <td class="num">${fmtCurr(pos.alisFiyati, 2)}</td>
+        <td class="num">${guncel!=null ? fmtCurr(guncel,2) : "—"}</td>
+        <td class="num ${colorClass(degisim)}">${degisim!=null ? fmtPct(degisim) : "—"}</td>
+        <td class="num">${fmtCurr(maliyet,0)}</td>
+        <td class="num">${guncelDeger!=null ? fmtCurr(guncelDeger,0) : "—"}</td>
+        <td class="num ${colorClass(kz)}">${kz!=null ? (kz>=0?"+":"")+fmtCurr(kz,0) : "—"}</td>
+        <td class="num ${colorClass(kzPct)}">${kzPct!=null ? fmtPct(kzPct) : "—"}</td>
+        <td class="num">${weight!=null ? fmtNum(weight,1)+"%" : "—"}</td>
+        <td><button class="btn danger" style="padding:2px 8px;font-size:11px" onclick="pfRemove('${pos.id}')">Sil</button></td>
+      </tr>`;
+    }).join("");
+    pfBody.innerHTML = `<table class="tbl">${head}${tbody}</table>`;
+  }
+  loadPf();
+
+  window.pfAdd = function() {
+    const sym   = (document.getElementById("pf-sym")?.value   || "").toUpperCase().trim();
+    const adet  = parseFloat(document.getElementById("pf-adet")?.value  || "");
+    const fiyat = parseFloat(document.getElementById("pf-fiyat")?.value || "");
+    const not   = document.getElementById("pf-not")?.value || "";
+    const errEl = document.getElementById("pf-form-err");
+    if (!sym)               { if (errEl) errEl.textContent = "Sembol gerekli"; return; }
+    if (!adet  || adet<=0)  { if (errEl) errEl.textContent = "Geçerli adet girin"; return; }
+    if (!fiyat || fiyat<=0) { if (errEl) errEl.textContent = "Geçerli alış fiyatı girin"; return; }
+    if (errEl) errEl.textContent = "";
+    const positions = getPortfolio();
+    positions.push({ id: Date.now().toString(), sembol: sym, adet, alisFiyati: fiyat, not, tarih: new Date().toISOString() });
+    savePortfolio(positions);
+    ["pf-sym","pf-adet","pf-fiyat","pf-not"].forEach(id => { const i = document.getElementById(id); if (i) i.value = ""; });
+    loadPf();
+  };
+  window.pfRemove = function(id) {
+    savePortfolio(getPortfolio().filter(p => p.id !== id));
+    loadPf();
+  };
+}
+
+/* ═══════════════════════════════════════════════════════
+   COMPARE PAGE
+   ═══════════════════════════════════════════════════════ */
+async function renderCompare(el) {
+  const paramSyms = state.routeParam ? state.routeParam.split(",").slice(0,3) : [];
+  el.innerHTML = `
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">Hisse Karşılaştırma</div></div>
+      <div style="padding:12px 16px">
+        <div class="compare-inputs">
+          <input id="cmp-s1" type="text" placeholder="Sembol 1" maxlength="10" value="${escapeHtml(paramSyms[0]||"")}">
+          <input id="cmp-s2" type="text" placeholder="Sembol 2" maxlength="10" value="${escapeHtml(paramSyms[1]||"")}">
+          <input id="cmp-s3" type="text" placeholder="Sembol 3 (opsiyonel)" maxlength="10" value="${escapeHtml(paramSyms[2]||"")}">
+          <button class="btn primary" onclick="doCompare()">Karşılaştır</button>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:4px">Ör: SASA, EREGL, AKBNK</div>
+      </div>
+    </div>
+    <div id="cmp-result"></div>
+  `;
+  ["cmp-s1","cmp-s2","cmp-s3"].forEach(id => {
+    const inp = document.getElementById(id);
+    if (inp) inp.addEventListener("keyup", e => { e.target.value = e.target.value.toUpperCase(); });
+  });
+
+  window.doCompare = async function() {
+    const syms = ["cmp-s1","cmp-s2","cmp-s3"]
+      .map(id => (document.getElementById(id)?.value || "").toUpperCase().trim())
+      .filter(Boolean);
+    const result = document.getElementById("cmp-result");
+    if (!result) return;
+    if (syms.length < 2) { result.innerHTML = `<div class="error-box">En az 2 sembol girin.</div>`; return; }
+    result.innerHTML = `<div class="loading" style="padding:20px">Veriler alınıyor…</div>`;
+    try {
+      const [analizArr, fiyatRes] = await Promise.all([
+        Promise.all(syms.map(s => API(`/api/v1/analiz?sembol=${encodeURIComponent(s)}&user_id=${USER_ID}`).catch(() => null))),
+        API(`/api/v1/fiyatlar?semboller=${syms.join(",")}&user_id=${USER_ID}`).catch(() => ({})),
+      ]);
+      if (!document.getElementById("cmp-result")) return;
+      const fiyatlar = fiyatRes?.fiyatlar || {};
+      const metrics = [
+        { label: "Fiyat",              fn: (a,f) => fmtCurr(f?.fiyat??a?.fiyat, 2) },
+        { label: "Değişim (Günlük)",   fn: (a,f) => { const v=f?.degisim; return `<span class="${colorClass(v)}">${arrowFor(v)} ${fmtPct(v)}</span>`; } },
+        { label: "Hacim (TL)",         fn: (a,f) => fmtVol(f?.hacim) },
+        { label: "1 Hafta Getiri",     fn: (a,f) => `<span class="${colorClass(f?.getiri_1h)}">${fmtPct(f?.getiri_1h)}</span>` },
+        { label: "1 Ay Getiri",        fn: (a,f) => `<span class="${colorClass(f?.getiri_1a)}">${fmtPct(f?.getiri_1a)}</span>` },
+        { label: "3 Ay Getiri",        fn: (a,f) => `<span class="${colorClass(f?.getiri_3a)}">${fmtPct(f?.getiri_3a)}</span>` },
+        { label: "1 Yıl Getiri",       fn: (a,f) => `<span class="${colorClass(f?.getiri_1y)}">${fmtPct(f?.getiri_1y)}</span>` },
+        { label: "HP Puan",            fn: a    => a?.analiz?.puan != null ? fmtNum(a.analiz.puan,3) : "—" },
+        { label: "Risk",               fn: a    => escapeHtml(a?.analiz?.risk||"—") },
+        { label: "Pivot",              fn: a    => escapeHtml(a?.analiz?.pivot||"—") },
+        { label: "Stop",               fn: a    => a?.analiz?.stop!=null ? fmtCurr(a.analiz.stop,2) : "—" },
+        { label: "Yön",                fn: a    => a?.analiz?.upwards!=null ? (a.analiz.upwards?"<span class='up'>▲ Yukarı</span>":"<span class='down'>▼ Aşağı</span>") : "—" },
+        { label: "F/K Oranı",          fn: a    => a?.temel_analiz?.["Hisse F/K Oranı"]!=null ? fmtNum(a.temel_analiz["Hisse F/K Oranı"],2) : "—" },
+        { label: "PD/DD Oranı",        fn: a    => a?.temel_analiz?.["Hisse PD/DD Oranı"]!=null ? fmtNum(a.temel_analiz["Hisse PD/DD Oranı"],2) : "—" },
+        { label: "Sektör F/K",         fn: a    => a?.temel_analiz?.["Sektör F/K Oranı"]!=null ? fmtNum(a.temel_analiz["Sektör F/K Oranı"],2) : "—" },
+        { label: "Prim Potansiyeli",   fn: a    => { const v=a?.temel_analiz?.["Hissenin Prim Potansiyeli (%)"]; return v!=null?`<span class="${colorClass(v)}">${fmtPct(v)}</span>`:"—"; } },
+        { label: "Değerleme Fiyatı",   fn: a    => fmtCurr(a?.temel_analiz?.["Hissenin Değerleme Fiyatı (₺)"],2) },
+        { label: "Piyasa Değeri",      fn: a    => a?.temel_analiz?.["Güncel Piyasa Değeri"]!=null ? fmtVol(a.temel_analiz["Güncel Piyasa Değeri"]) : "—" },
+        { label: "12A Net Kâr",        fn: a    => a?.temel_analiz?.["12 Aylık Net Kâr"]!=null ? fmtVol(a.temel_analiz["12 Aylık Net Kâr"]) : "—" },
+        { label: "Sektör",             fn: a    => escapeHtml(a?.temel_analiz?.["Sektör"]||"—") },
+      ];
+      const thS = "padding:8px 14px;text-align:right;font-size:11px;color:var(--text-dim);white-space:nowrap";
+      const tdS = "padding:7px 14px;text-align:right;font-size:12.5px";
+      const tlS = "padding:7px 14px;text-align:left;font-size:12px;color:var(--text-dim)";
+      const rS  = "border-top:1px solid var(--border)";
+      const header = `<tr>
+        <th style="${thS};text-align:left">Metrik</th>
+        ${syms.map((s,i) => `<th style="${thS}">
+          <a href="#symbol/${encodeURIComponent(s)}" style="color:var(--accent);font-family:var(--mono);font-size:13px">${escapeHtml(s)}</a>
+          ${analizArr[i]?.aciklama ? `<div style="font-size:10px;color:var(--text-dim);font-weight:400;margin-top:2px">${escapeHtml((analizArr[i].aciklama||"").slice(0,35))}</div>` : ""}
+        </th>`).join("")}
+      </tr>`;
+      const trows = metrics.map(m => `<tr style="${rS}">
+        <td style="${tlS}">${m.label}</td>
+        ${syms.map((s,i) => `<td style="${tdS}">${m.fn(analizArr[i], fiyatlar[s])}</td>`).join("")}
+      </tr>`).join("");
+      result.innerHTML = `<div class="panel"><table style="width:100%;border-collapse:collapse"><thead>${header}</thead><tbody>${trows}</tbody></table></div>`;
+    } catch(e) {
+      const r = document.getElementById("cmp-result");
+      if (r) r.innerHTML = `<div class="error-box">Veri alınamadı.</div>`;
+    }
+  };
+  if (paramSyms.length >= 2) window.doCompare();
+}
+
+/* ═══════════════════════════════════════════════════════
+   KEYBOARD SHORTCUTS
+   ═══════════════════════════════════════════════════════ */
+function setupKeyboardShortcuts() {
+  let gPending = false;
+  let gTimer = null;
+  document.addEventListener("keydown", (e) => {
+    const tag = document.activeElement?.tagName;
+    if (["INPUT","TEXTAREA","SELECT"].includes(tag)) return;
+    const modal = document.getElementById("shortcuts-modal");
+
+    if (e.key === "?") {
+      e.preventDefault();
+      if (modal) modal.style.display = modal.style.display === "none" ? "flex" : "none";
+      return;
+    }
+    if (e.key === "Escape") {
+      if (modal && modal.style.display !== "none") { modal.style.display = "none"; return; }
+      return;
+    }
+    if (e.key === "r" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      clearPollers(); render(); refreshTicker();
+      return;
+    }
+    if (e.key === "g" && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      gPending = true;
+      clearTimeout(gTimer);
+      gTimer = setTimeout(() => { gPending = false; }, 1500);
+      return;
+    }
+    if (gPending) {
+      const map = { d: "dashboard", w: "watchlist", m: "markets", p: "portfolio", c: "compare", s: "screener", a: "alarms" };
+      if (map[e.key]) {
+        e.preventDefault();
+        gPending = false;
+        clearTimeout(gTimer);
+        navTo(map[e.key]);
+      }
+    }
+  });
+  const btn = document.getElementById("btn-shortcuts");
+  if (btn) btn.onclick = () => {
+    const modal = document.getElementById("shortcuts-modal");
+    if (modal) modal.style.display = modal.style.display === "none" ? "flex" : "none";
+  };
 }
 
 /* ───────────── INIT ───────────── */
@@ -1713,6 +3279,23 @@ window.addToWatchlist = addToWatchlist;
 window.removeFromWatchlist = removeFromWatchlist;
 window.addToWatchlistPrompt = addToWatchlistPrompt;
 window.clearWatchlist = clearWatchlist;
+
+// Badges
+updatePortfolioBadge();
+updateAlarmsBadge();
+
+// Market status: update now + every minute
+updateMarketBadge();
+setInterval(updateMarketBadge, 60_000);
+
+// Alarm checker: every 30s
+setInterval(checkAlarms, 30_000);
+
+// Recent sidebar: update on price refresh
+setInterval(updateRecentSidebar, 10_000);
+
+// Keyboard shortcuts
+setupKeyboardShortcuts();
 
 setupSearch();
 bootstrap();

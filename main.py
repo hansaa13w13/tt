@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import time
@@ -7,8 +8,9 @@ from datetime import datetime, timedelta
 from urllib.parse import urlencode, parse_qs, urlparse, quote
 
 import requests
+from requests.adapters import HTTPAdapter
 from flask import Flask, request, Response, jsonify, abort
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import telegram_session
 
@@ -45,6 +47,20 @@ _AKD_LOCK = threading.Lock()
 _SIRALA_LOCK = threading.Lock()
 _INIT_LOCK = threading.Lock()
 
+# ── Shared HTTP session with connection pooling ──────────────────────────────
+_HTTP_SESSION = requests.Session()
+_http_adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=0)
+_HTTP_SESSION.mount("https://", _http_adapter)
+_HTTP_SESSION.mount("http://",  _http_adapter)
+_HTTP_SESSION.headers.update({"Accept-Encoding": "gzip, deflate"})
+
+# ── Shared thread pool (avoids per-request executor overhead) ─────────────────
+_SHARED_EXECUTOR = ThreadPoolExecutor(max_workers=20, thread_name_prefix="hp-fetch")
+
+# ── Init-data in-memory cache (TTL 25 s) ──────────────────────────────────────
+_INIT_DATA_CACHE: dict = {"value": None, "ts": 0.0}
+_INIT_CACHE_TTL = 25.0
+
 app = Flask(__name__)
 
 
@@ -66,7 +82,13 @@ def _clean_symbol(s):
 
 
 def get_real_init_data():
-    """Read saved real init data from disk if still valid; otherwise fallback."""
+    """Read saved real init data from disk if still valid; cache result for TTL seconds."""
+    now = time.time()
+    with _INIT_LOCK:
+        if _INIT_DATA_CACHE["value"] is not None and (now - _INIT_DATA_CACHE["ts"]) < _INIT_CACHE_TTL:
+            return _INIT_DATA_CACHE["value"]
+
+    result = FALLBACK_INIT_DATA
     if os.path.isfile(INIT_DATA_FILE):
         try:
             with open(INIT_DATA_FILE, "r", encoding="utf-8") as f:
@@ -75,11 +97,15 @@ def get_real_init_data():
                 params = _parse_qs_flat(saved)
                 saved_hash = params.get("hash", "")
                 saved_auth = int(params.get("auth_date", 0) or 0)
-                if saved_hash and not saved_hash.startswith("aabb") and (time.time() - saved_auth) < 86400:
-                    return saved
+                if saved_hash and not saved_hash.startswith("aabb") and (now - saved_auth) < 86400:
+                    result = saved
         except Exception:
             pass
-    return FALLBACK_INIT_DATA
+
+    with _INIT_LOCK:
+        _INIT_DATA_CACHE["value"] = result
+        _INIT_DATA_CACHE["ts"] = now
+    return result
 
 
 def build_headers(extra=None):
@@ -113,9 +139,9 @@ def build_headers(extra=None):
 
 
 def proxy_request(url, method, headers, body=b""):
-    """Mirror of PHP proxyRequest using requests."""
+    """Mirror of PHP proxyRequest using shared session."""
     try:
-        r = requests.request(
+        r = _HTTP_SESSION.request(
             method=method,
             url=url,
             headers=headers,
@@ -344,54 +370,70 @@ INJECT_SCRIPT = _load_inject_script()
 # ─────────────────────────── Mock Data ───────────────────────────
 
 MOCK_SEMBOLLER = [
-    'A1CAP','ACSEL','ADEL','ADESE','ADFGY','ADGYO','ADNAC','AEFES','AGESA','AGROT',
-    'AGYO','AHGAZ','AHSGY','AKBNK','AKCNS','AKFGY','AKFIN','AKGRT','AKGUÇ','AKLEASE',
-    'AKSA','AKSEN','AKTIF','AKYHO','ALARK','ALBRK','ALFAS','ALGYO','ALKIM','ALMAD',
-    'ALTINS','ALTIN','ANGEN','ANHYT','ANELE','ANSGR','ARASE','ARCLK','ARDYZ','ARENA',
-    'ARMADA','ARSAN','ARYES','ASGYO','ASELS','ASLAN','ASTOR','ATAKP','ATATP','ATEKS',
-    'ATLAS','ATSYH','AVGYO','AVHOL','AVOD','AVTUR','AYCES','AYDEM','AYEN','AYES',
-    'AZTEK','BAGFS','BAKAB','BALAT','BANVT','BASCM','BASGZ','BERA','BEYAZ','BIGCH',
-    'BIMAS','BIOEN','BIZIM','BJKAS','BLCYT','BNTAS','BOSSA','BRISA','BRMEN','BRKVY',
-    'BRLSM','BRYAT','BSOKE','BTCIM','BUCIM','BURCE','BURVA','BVSAN','CANTE','CARFA',
-    'CASA','CCHOL','CCOLA','CELHA','CEMTS','CIMSA','CLEBI','CMBTN','CMENT','COKAL',
-    'COSMO','CRDFA','CRFSA','CUSAN','CWENE','DAGHL','DAGI','DAPGM','DARDL','DENGE',
-    'DERHL','DERIM','DESA','DESPC','DEVA','DGATE','DGNMO','DITAS','DMSAS','DNISI',
-    'DOAS','DOFER','DOHOL','DOKTA','DORE','DREDE','DTRND','DURAN','DYOBY','DZGYO',
-    'EAPRO','ECILC','ECZYT','EDIP','EGEEN','EGEPO','EGGUB','EGPRO','EGSER','EKGYO',
-    'EKIZ','EKSUN','ELITE','EMKEL','EMNIS','EMPAT','ENDAE','ENERY','ENGYO','ENJSA',
-    'ENKAI','ENSRI','EONMG','EPLAS','ERBOS','ERCB','ERGL','EREGL','ERSU','ESCAR',
-    'ESCOM','ESEN','ETGGY','ETYAT','EUHOL','EUPWR','EUREN','EUYO','FAAC','FADE',
-    'FENER','FMIZP','FONET','FORMT','FORTE','FROTO','GARFA','GARAN','GENTS','GEREL',
-    'GESAN','GIPTA','GLBMD','GLCVY','GLRYH','GLYHO','GMTAS','GOLDS','GOLTS','GOODY',
-    'GOZDE','GRSEL','GRTRK','GSDDE','GSDHO','GSRAY','GUBRF','GUSGR','GWIND','GZNMI',
-    'HALKB','HATEK','HATSN','HEDEF','HEKTS','HKTM','HLGYO','HTTBT','HUBVC','HUNER',
-    'HURGZ','HZNDR','ICBCT','ICUGS','IDEAS','IDGYO','IDOSA','IEYHO','IGDAS','IHEVA',
-    'IHLGM','IHLAS','IHYAY','IMASM','INDES','INFO','INGRM','INTEM','INVEO','IPEKE',
-    'ISBIR','ISCTR','ISFIN','ISGSY','ISGYO','ISKPL','ISKUR','ISMEN','ISSEN','ISYAT',
-    'ITTFH','IZFAS','IZMDC','JANTS','KAPLM','KAREL','KARSN','KARYE','KATMR','KAYSE',
-    'KAZMO','KBORU','KCHOL','KCVGY','KERVT','KEREVT','KFEIN','KGYO','KIMMR','KLGYO',
-    'KLKIM','KLMSN','KLRHO','KLSYN','KMPUR','KNFRT','KONTR','KONYA','KORDS','KOTAM',
-    'KOTON','KOZAA','KOZAL','KRDMA','KRDMB','KRDMD','KRPLS','KRSTL','KRTEK','KRVGD',
-    'KSGYO','KTLEV','KTSKR','KURTL','KUYAS','KZBGY','LIDER','LIDFA','LINK','LKMNH',
-    'LOGO','LRSHO','LUKSK','LVENT','MAALT','MAGEN','MAKIM','MAKTK','MANAS','MARBL',
-    'MARKA','MARTI','MASDL','MAVI','MEGAP','MEGMT','MEKAG','MEPET','METUR','MGROS',
-    'MHRGY','MIATK','MIPAZ','MMCAS','MNDRS','MNDTR','MOBTL','MOGAN','MPARK','MRGYO',
-    'MRSHL','MSGYO','MTRKS','MZHLD','NATEN','NCTS','NETAS','NIBAS','NILYT','NKOLAS',
-    'NTGAZ','NTHOL','NTTUR','NUROL','OBAMS','ODAS','OFSYM','ONCSM','ONRYT','ORCAY',
-    'ORGE','ORMA','ORMGE','OSMEN','OSTIM','OTKAR','OYAKC','OYAYO','OYLUM','OZGYO',
-    'OZKGY','PAGYO','PAMEL','PAPIL','PARSN','PASEU','PCILT','PEHOL','PEKGY','PENGD',
-    'PETKM','PETUN','PGSUS','PHNMG','PINSU','PKART','PKENT','PLTUR','POLHO','POLTK',
-    'PRDCH','PRTAS','PRZMA','PSDTC','PSGYO','PTOFS','PYGYO','QUAGR','RALYH','RAYSG',
-    'RLYHO','RODRG','ROYAL','RTALB','RUBNS','RYGYO','RYSAS','SAHOL','SAMAT','SARKY',
-    'SASA','SAYAS','SEKFK','SEKUR','SELEC','SELVA','SEYKM','SILVR','SKBNK','SKTAS',
-    'SKYMD','SMART','SMRTG','SNGYO','SNKRN','SODSN','SOKM','SOKTM','SONME','SRVGY',
-    'SUMAS','SUNTK','SUWEN','TABGD','TARKM','TATGD','TAVHL','TBORG','TCELL','TDGYO',
-    'TEBNK','TEKTU','TEZOL','THYAO','TIRE','TISAS','TKFEN','TKNSA','TLMAN','TMSN',
-    'TMPOL','TOASO','TOGG','TRGYO','TRILC','TSPOR','TTKOM','TTRAK','TUCLK','TUKAS',
-    'TUKEY','TUPRS','TUREX','TURGG','TURSG','UFUK','ULUUN','ULUSE','ULUSM','ULVAC',
-    'UNAM','UNLU','USAK','VAKBN','VAKFN','VAKKO','VBTS','VERUS','VESBE','VESTL',
-    'VKFYO','VKING','VRGYO','YAPRK','YAYLA','YBTAS','YGGYO','YKBNK','YKSLN','YLGYO',
-    'YONGA','YYLGD','YUNSA','ZEDUR','ZGNYO','ZOREN','ZRGYO','ZRKGK',
+    'A1CAP','A1YEN','AAGYO','ACSEL','ADEL','ADESE','ADGYO','AEFES','AFYON','AGESA',
+    'AGHOL','AGROT','AGYO','AHGAZ','AHSGY','AKBNK','AKCNS','AKENR','AKFGY','AKFIS',
+    'AKFYE','AKGRT','AKHAN','AKMGY','AKSA','AKSEN','AKSGY','AKSUE','AKYHO','ALARK',
+    'ALBRK','ALCAR','ALCTL','ALFAS','ALGYO','ALKA','ALKIM','ALKLC','ALMAD','ALTNY',
+    'ALVES','ANELE','ANGEN','ANHYT','ANSGR','ARASE','ARCLK','ARDYZ','ARENA','ARFYE',
+    'ARMGD','ARSAN','ARTMS','ARZUM','ASELS','ASGYO','ASTOR','ASUZU','ATAGY','ATAKP',
+    'ATATP','ATATR','ATEKS','ATLAS','ATSYH','AVGYO','AVHOL','AVOD','AVPGY','AVTUR',
+    'AYCES','AYDEM','AYEN','AYES','AYGAZ','AZTEK','BAGFS','BAHKM','BAKAB','BALAT',
+    'BALSU','BANVT','BARMA','BASCM','BASGZ','BAYRK','BEGYO','BERA','BESLR','BESTE',
+    'BEYAZ','BFREN','BIENY','BIGCH','BIGEN','BIGTK','BIMAS','BINBN','BINHO','BIOEN',
+    'BIZIM','BJKAS','BLCYT','BLUME','BMSCH','BMSTL','BNTAS','BOBET','BORLS','BORSK',
+    'BOSSA','BRISA','BRKO','BRKSN','BRKVY','BRLSM','BRMEN','BRSAN','BRYAT','BSOKE',
+    'BTCIM','BUCIM','BULGS','BURCE','BURVA','BVSAN','BYDNR','CANTE','CASA','CATES',
+    'CCOLA','CELHA','CEMAS','CEMTS','CEMZY','CEOEM','CGCAM','CIMSA','CLEBI','CMBTN',
+    'CMENT','CONSE','COSMO','CRDFA','CRFSA','CUSAN','CVKMD','CWENE','DAGHL','DAGI',
+    'DAPGM','DARDL','DCTTR','DENGE','DERHL','DERIM','DESA','DESPC','DEVA','DGATE',
+    'DGGYO','DGNMO','DIRIT','DITAS','DMRGD','DMSAS','DNISI','DOAS','DOBUR','DOCO',
+    'DOFER','DOFRB','DOGUB','DOHOL','DOKTA','DSTKF','DUNYH','DURDO','DURKN','DYOBY',
+    'DZGYO','EBEBK','ECILC','ECOGR','ECZYT','EDATA','EDIP','EFOR','EFORC','EGEEN',
+    'EGEGY','EGEPO','EGGUB','EGPRO','EGSER','EKGYO','EKIZ','EKOS','EKSUN','ELITE',
+    'EMKEL','EMNIS','EMPAE','ENDAE','ENERY','ENJSA','ENKAI','ENPRA','ENSRI','ENTRA',
+    'EPLAS','ERBOS','ERCB','EREGL','ERSU','ESCAR','ESCOM','ESEN','ETILR','ETYAT',
+    'EUHOL','EUKYO','EUPWR','EUREN','EUYO','EYGYO','FADE','FENER','FLAP','FMIZP',
+    'FONET','FORMT','FORTE','FRIGO','FRMPL','FROTO','FZLGY','GARAN','GARFA','GATEG',
+    'GEDIK','GEDZA','GENIL','GENKM','GENTS','GEREL','GESAN','GIPTA','GLBMD','GLCVY',
+    'GLRMK','GLRYH','GLYHO','GMTAS','GOKNR','GOLTS','GOODY','GOZDE','GRNYO','GRSEL',
+    'GRTHO','GRTRK','GSDDE','GSDHO','GSRAY','GUBRF','GUNDG','GWIND','GZNMI','HALKB',
+    'HATEK','HATSN','HDFGS','HEDEF','HEKTS','HKTM','HLGYO','HOROZ','HRKET','HTTBT',
+    'HUBVC','HUNER','HURGZ','ICBCT','ICUGS','IDEAS','IDGYO','IEYHO','IHAAS','IHEVA',
+    'IHGZT','IHLAS','IHLGM','IHYAY','IMASM','INDES','INFO','INGRM','INTEK','INTEM',
+    'INVEO','INVES','IPEKE','ISATR','ISBIR','ISBTR','ISCTR','ISDMR','ISFIN','ISGSY',
+    'ISGYO','ISKPL','ISKUR','ISMEN','ISSEN','ISYAT','ITTFH','IZENR','IZFAS','IZINV',
+    'IZMDC','JANTS','KAPLM','KAREL','KARSN','KARTN','KARYE','KATMR','KAYSE','KBORU',
+    'KCAER','KCHOL','KENT','KERVN','KERVT','KFEIN','KGYO','KIMMR','KLGYO','KLKIM',
+    'KLMSN','KLNMA','KLRHO','KLSER','KLSYN','KLYPV','KMPUR','KNFRT','KOCMT','KONKA',
+    'KONTR','KONYA','KOPOL','KORDS','KOTON','KOZAA','KOZAL','KRDMA','KRDMB','KRDMD',
+    'KRGYO','KRONT','KRPLS','KRSTL','KRTEK','KRVGD','KSTUR','KTLEV','KTSKR','KUTPO',
+    'KUVVA','KUYAS','KZBGY','KZGYO','LIDER','LIDFA','LILAK','LINK','LKMNH','LMKDC',
+    'LOGO','LRSHO','LUKSK','LXGYO','LYDHO','LYDYE','MAALT','MACKO','MAGEN','MAKIM',
+    'MAKTK','MANAS','MARBL','MARKA','MARMR','MARTI','MAVI','MCARD','MEDTR','MEGAP',
+    'MEGMT','MEKAG','MEPET','MERCN','MERIT','MERKO','METRO','METUR','MEYSU','MGROS',
+    'MHRGY','MIATK','MIPAZ','MMCAS','MNDRS','MNDTR','MOBTL','MOGAN','MOPAS','MPARK',
+    'MRGYO','MRSHL','MSGYO','MTRKS','MTRYO','MZHLD','NATEN','NETAS','NETCD','NIBAS',
+    'NTGAZ','NTHOL','NUGYO','NUHCM','OBAMS','OBASE','ODAS','ODINE','OFSYM','ONCSM',
+    'ONRYT','ORCAY','ORGE','ORMA','OSMEN','OSTIM','OTKAR','OTTO','OYAKC','OYAYO',
+    'OYLUM','OYYAT','OZATD','OZGYO','OZKGY','OZRDN','OZSUB','OZYSR','PAGYO','PAHOL',
+    'PAMEL','PAPIL','PARSN','PASEU','PATEK','PCILT','PEHOL','PEKGY','PENGD','PENTA',
+    'PETKM','PETUN','PGSUS','PINSU','PKART','PKENT','PLTUR','PNLSN','PNSUT','POLHO',
+    'POLTK','PRDGS','PRKAB','PRKME','PRZMA','PSDTC','PSGYO','QNBFB','QNBFK','QNBFL',
+    'QNBTR','QUAGR','RALYH','RAYSG','REEDR','RGYAS','RNPOL','RODRG','ROYAL','RTALB',
+    'RUBNS','RUZYE','RYGYO','RYSAS','SAFKR','SAHOL','SAMAT','SANEL','SANFM','SANKO',
+    'SARKY','SASA','SAYAS','SDTTR','SEGMN','SEGYO','SEKFK','SEKUR','SELEC','SELGD',
+    'SELVA','SERNT','SEYKM','SILVR','SISE','SKBNK','SKTAS','SKYLP','SKYMD','SMART',
+    'SMRTG','SMRVA','SNGYO','SNICA','SNKRN','SNPAM','SODSN','SOKE','SOKM','SONME',
+    'SRVGY','SUMAS','SUNTK','SURGY','SUWEN','SVGYO','TABGD','TARKM','TATEN','TATGD',
+    'TAVHL','TBORG','TCELL','TCKRC','TDGYO','TEHOL','TEKTU','TERA','TETMT','TEZOL',
+    'TGSAS','THYAO','TKFEN','TKNSA','TLMAN','TMPOL','TMSN','TNZTP','TOASO','TRALT',
+    'TRCAS','TRENJ','TRGYO','TRHOL','TRILC','TRMET','TSGYO','TSKB','TSPOR','TTKOM',
+    'TTRAK','TUCLK','TUKAS','TUPRS','TUREX','TURGG','TURSG','UCAYM','UFUK','ULAS',
+    'ULKER','ULUFA','ULUSE','ULUUN','UMPAS','UNLU','USAK','UZERB','VAKBN','VAKFA',
+    'VAKFN','VAKKO','VANGD','VBTYZ','VERTU','VERUS','VESBE','VESTL','VKFYO','VKGYO',
+    'VKING','VRGYO','VSNMD','YAPRK','YATAS','YAYLA','YBTAS','YEOTK','YESIL','YGGYO',
+    'YGYO','YIGIT','YKBNK','YKSLN','YONGA','YUNSA','YYAPI','YYLGD','ZEDUR','ZERGY',
+    'ZGYO','ZOREN','ZRGYO',
 ]
 
 ALARM_LIMITLER = {
@@ -400,6 +442,123 @@ ALARM_LIMITLER = {
     'kademe_sikisma': 100, 'sinyal': 100, 'teknik_skor': 100, 'rsi_bosalma': 100,
     'bb_sikisma': 100, 'kap': 100, 'kurum_akd': 100, 'temettu': 100,
     'gunluk_ozet': 100,
+}
+
+_MOCK_YIELDS = {
+    '1w':  {'prev_close_date': '2026-04-24', 'prev_close': 100.0, 'high': 110.0, 'low': 95.0},
+    '1m':  {'prev_close_date': '2026-04-01', 'prev_close': 95.0,  'high': 115.0, 'low': 90.0},
+    '3m':  {'prev_close_date': '2026-02-01', 'prev_close': 85.0,  'high': 120.0, 'low': 80.0},
+    '6m':  {'prev_close_date': '2025-11-01', 'prev_close': 80.0,  'high': 125.0, 'low': 75.0},
+    'ytd': {'prev_close_date': '2025-12-31', 'prev_close': 82.0,  'high': 120.0, 'low': 75.0},
+    '1y':  {'prev_close_date': '2025-05-01', 'prev_close': 50.0,  'high': 125.0, 'low': 45.0},
+    '3y':  {'prev_close_date': None, 'prev_close': None, 'high': None, 'low': None},
+    '5y':  {'prev_close_date': None, 'prev_close': None, 'high': None, 'low': None},
+    'oldest': {'prev_close_date': '2023-01-01', 'prev_close': 10.0, 'high': 125.0, 'low': 8.0},
+}
+
+_MOCK_COMPANY = {
+    'code': 'THYAO', 'title': 'Türk Hava Yolları A.O.', 'logo': '', 'cover': None,
+    'sectors': [31],
+    'sheet_template': 'default', 'sectoral_template': None,
+    'price': 0.0, 'fiscal_period_start_date': None, 'fiscal_period_end_date': None,
+    'description': '', 'enflasyon': False,
+    'ratio_types': [
+        {'key': 'likidite-oranlari', 'name': 'Likidite Oranları', 'data': [
+            {'key': 'cari_oran',       'name': 'Cari Oran',      'allowed': True},
+            {'key': 'likidite_orani',  'name': 'Likidite Oranı', 'allowed': True},
+            {'key': 'nakit_oran',      'name': 'Nakit Oran',     'allowed': True},
+        ]},
+        {'key': 'kaldirac-oranlari', 'name': 'Kaldıraç Oranları', 'data': [
+            {'key': 'kaldirac_orani',       'name': 'Kaldıraç Oranı',    'allowed': True},
+            {'key': 'finansal_borc_orani',  'name': 'Finansal Borç Oranı','allowed': True},
+        ]},
+        {'key': 'faaliyet-etkinlik-oranlari', 'name': 'Faaliyet Etkinlik Oranları', 'data': [
+            {'key': 'aktif_devir_hizi',    'name': 'Aktif Devir Hızı',   'allowed': True},
+            {'key': 'stok_devir_hizi',     'name': 'Stok Devir Hızı',    'allowed': True},
+            {'key': 'borc_devir_hizi',     'name': 'Borç Devir Hızı',    'allowed': True},
+            {'key': 'ozkaynak_devir_hizi', 'name': 'Özkaynak Devir Hızı','allowed': True},
+            {'key': 'alacak_devir_hizi',   'name': 'Alacak Devir Hızı',  'allowed': True},
+        ]},
+        {'key': 'karlilik-oranlari', 'name': 'Karlılık Oranları', 'data': [
+            {'key': 'aktif_karlilik',                'name': 'Aktif Karlılık',                     'allowed': True},
+            {'key': 'ozvarlik_karliligi',             'name': 'Özkaynak Karlılığı',                 'allowed': True},
+            {'key': 'brut_kar_marji',                 'name': 'Brüt Kar Marjı',                    'allowed': True},
+            {'key': 'esas_faaliyet_kar_marji',        'name': 'Esas Faaliyet Kar Marjı',           'allowed': True},
+            {'key': 'favok_marji',                    'name': 'FAVÖK Marjı',                       'allowed': True},
+            {'key': 'net_kar_marji',                  'name': 'Net Kar Marjı',                     'allowed': True},
+            {'key': 'ceyreklik_brut_kar_marji',       'name': 'Brüt Kar Marjı (Çeyreklik)',        'allowed': True},
+            {'key': 'ceyreklik_esas_faaliyet_kar_marji','name': 'Esas Faaliyet Kar Marjı (Çeyreklik)','allowed': True},
+            {'key': 'ceyreklik_favok_marji',          'name': 'FAVÖK Marjı (Çeyreklik)',           'allowed': True},
+            {'key': 'ceyreklik_net_kar_marji',        'name': 'Net Kar Marjı (Çeyreklik)',         'allowed': True},
+            {'key': 'roic',                           'name': 'ROIC',                              'allowed': True},
+            {'key': 'hisse_basina_kar',               'name': 'Hisse Başına Kar',                  'allowed': True},
+        ]},
+        {'key': 'diger-kalemler', 'name': 'Diğer Kalemler', 'data': [
+            {'key': 'ceyreklik_satislar',                 'name': 'Satışlar (Çeyreklik)',              'allowed': True},
+            {'key': 'ceyreklik_favok',                    'name': 'FAVÖK (Çeyreklik)',                 'allowed': True},
+            {'key': 'ceyreklik_fvok',                     'name': 'Net Faaliyet Karı (Çeyreklik)',     'allowed': True},
+            {'key': 'ceyreklik_net_kar',                  'name': 'Net Kar (Çeyreklik)',               'allowed': True},
+            {'key': 'yilliklandirilmis_satislar',         'name': 'Satışlar (Yıllıklandırılmış)',      'allowed': True},
+            {'key': 'yilliklandirilmis_favok',            'name': 'FAVÖK (Yıllıklandırılmış)',         'allowed': True},
+            {'key': 'yilliklandirilmis_fvok',             'name': 'Net Faaliyet Karı (Yıllıklandırılmış)','allowed': True},
+            {'key': 'yilliklandirilmis_net_kar',          'name': 'Net Kar (Yıllıklandırılmış)',       'allowed': True},
+            {'key': 'net_borc',                           'name': 'Net Borç',                          'allowed': True},
+            {'key': 'ceyreklik_serbest_nakit_akisi',      'name': 'Çeyreklik Serbest Nakit Akışı',     'allowed': True},
+            {'key': 'yilliklandirilmis_serbest_nakit_akisi','name': 'Yıllıklandırılmış Serbest Nakit Akışı','allowed': True},
+        ]},
+    ],
+    'is_new_ipo': False, 'has_meta': True, 'has_buybacks': True,
+    'has_participation': True, 'has_business_contracts': True,
+    'has_sectoral_data_types': False, 'in_katilim_index': False,
+    'functional_currency': None, 'administrative_measures': [],
+}
+
+_MOCK_FINANSAL_INNER = {
+    'code': {'$eq': 'THYAO'},
+    'initial': {'user': '', 'favorites': ''},
+    'company': dict(_MOCK_COMPANY),
+    'sectors': [{'title': 'Havacılık', 'slug': 'havacilik'}],
+    'ratio_types': [
+        {'name': 'Çeyreklik', 'key': 'quarterly', 'data': [
+            {'key': 'quarterly', 'name': 'Çeyreklik', 'allowed': True},
+        ]},
+        {'name': 'Yıllık', 'key': 'annual', 'data': [
+            {'key': 'annual', 'name': 'Yıllık', 'allowed': True},
+        ]},
+        {'name': 'TTM', 'key': 'ttm', 'data': [
+            {'key': 'ttm', 'name': 'TTM', 'allowed': True},
+        ]},
+        {'name': 'Çeyreklik (Ort.)', 'key': 'quarterly_avg', 'data': [
+            {'key': 'quarterly_avg', 'name': 'Çeyreklik (Ort.)', 'allowed': True},
+        ]},
+        {'name': 'Yıllık (Ort.)', 'key': 'annual_avg', 'data': [
+            {'key': 'annual_avg', 'name': 'Yıllık (Ort.)', 'allowed': True},
+        ]},
+    ],
+    'data': [
+        {'key': 'gelir', 'name': 'Gelir', 'allowed': True},
+        {'key': 'gider', 'name': 'Gider', 'allowed': True},
+        {'key': 'kar',   'name': 'Net Kâr', 'allowed': True},
+    ],
+    'periods': [],
+    'source_period': {'year': 2025, 'month': 12},
+    'values': [],
+    'quarter_values': [],
+    'ttm_values': [],
+}
+
+_MOCK_KARNE = {
+    'code': {'$eq': 'THYAO'},
+    'initial': {'user': '', 'favorites': ''},
+    'company': dict(_MOCK_COMPANY),
+    'sectors': [{'title': 'Havacılık', 'slug': 'havacilik'}],
+    'ratio_types': [],
+    'data': [
+        {'key': 'karlilik', 'name': 'Karlılık', 'allowed': True},
+        {'key': 'buyume',   'name': 'Büyüme',   'allowed': True},
+        {'key': 'borclu',   'name': 'Borçluluk','allowed': True},
+    ],
+    'similars': {'company': dict(_MOCK_COMPANY), 'to': '', 'title': ''},
 }
 
 MOCK_RESPONSES = {
@@ -419,19 +578,376 @@ MOCK_RESPONSES = {
         'ok': True, 'alarmlar': [], 'is_premium': True,
         'limitler': dict(ALARM_LIMITLER),
     },
-    '/api/v1/portfoy':       {'ok': True, 'portfoy': []},
-    '/api/v1/portfoy_liste': {'ok': True, 'liste': []},
-    '/api/v1/favoriler':     {'ok': True, 'liste': []},
-    '/api/v1/alarm_kur':     {'ok': True},
-    '/api/v1/alarm_sil':     {'ok': True},
-    '/api/v1/favori_ekle':   {'ok': True},
-    '/api/v1/favori_sil':    {'ok': True},
-    '/api/v1/portfoy_ekle':  {'ok': True},
-    '/api/v1/portfoy_sil':   {'ok': True},
-    '/api/v1/liste_olustur': {'ok': True},
-    '/api/v1/liste_sil':     {'ok': True},
-    '/api/v1/liste_sembol':  {'ok': True},
-    '/api/v1/semboller':     {'ok': True, 'semboller': MOCK_SEMBOLLER},
+    '/api/v1/portfoy':          {'ok': True, 'portfoy': []},
+    '/api/v1/portfoy_liste':    {'ok': True, 'liste': []},
+    '/api/v1/favoriler':        {'ok': True, 'liste': []},
+    '/api/v1/alarm_kur':        {'ok': True},
+    '/api/v1/alarm_sil':        {'ok': True},
+    '/api/v1/favori_ekle':      {'ok': True},
+    '/api/v1/favori_sil':       {'ok': True},
+    '/api/v1/portfoy_ekle':     {'ok': True},
+    '/api/v1/portfoy_sil':      {'ok': True},
+    '/api/v1/liste_olustur':    {'ok': True},
+    '/api/v1/liste_sil':        {'ok': True},
+    '/api/v1/liste_sembol':     {'ok': True},
+    '/api/v1/semboller':        {'ok': True, 'semboller': MOCK_SEMBOLLER},
+
+    # ── Özet sekmesi ──────────────────────────────────────────────────────────
+    '/api/v1/ozet': {
+        'sembol': '', 'aciklama': '', 'logo': '', 'fiyat': 0.0,
+        'degisim': 0.0, 'hacim': 0.0, 'alis': 0.0, 'satis': None,
+        'yields': dict(_MOCK_YIELDS),
+        'endeksler': [],
+        'ozet': {
+            'code': {'$eq': ''},
+            'initial': {'user': '', 'favorites': ''},
+            'company': dict(_MOCK_COMPANY),
+            'sectors': [],
+            'ratio_types': [],
+            'data': [],
+            'symbol': {
+                'type': 'equity', 'logo': '', 'title': '', 'code': '',
+                'format': {'decimals': 2, 'thousand': True},
+                'session': '0955-1810', 'flags': [],
+                'sheet_template': 'default',
+            },
+            'periods': [],
+            'values': [],
+            'scores': [],
+            'distribution': {'colors': [], 'pairs': []},
+            'pairs': [],
+            'value': [],
+        },
+    },
+    '/api/v1/fiyat': {
+        'sembol': '', 'aciklama': '', 'logo': '',
+        'fiyat': 0.0, 'degisim': 0.0, 'hacim': 0.0,
+        'alis': 0.0, 'satis': None,
+        'getiriler': {
+            '1h': 0.0, '1a': 0.0, '3a': 0.0,
+            '6a': 0.0, 'ytd': 0.0, '1y': 0.0,
+        },
+    },
+    '/api/v1/fiyatlar': {
+        'fiyatlar': {},
+    },
+    '/api/v1/sektorel':  {'sembol': '', 'veriler': None},
+
+    # ── Teknik Özet (modal) ───────────────────────────────────────────────────
+    '/api/v1/teknik_ozet': {
+        'sembol': '', 'fiyat': 0.0,
+        'indikatorler': [
+            {'ad': 'RSI (14)',     'deger': 50.0, 'sinyal': 'NOTR',  'detay': ''},
+            {'ad': 'MACD',        'deger': 0.0,  'sinyal': 'NOTR',  'detay': ''},
+            {'ad': 'Bollinger',   'deger': 0.0,  'sinyal': 'NOTR',  'detay': ''},
+            {'ad': 'Stochastic',  'deger': 50.0, 'sinyal': 'NOTR',  'detay': ''},
+        ],
+        'ozet': {
+            'al_sayisi': 0, 'sat_sayisi': 0, 'notr_sayisi': 4,
+            'genel_sinyal': 'NOTR', 'skor': 50,
+        },
+    },
+
+    # ── Analiz sekmesi (teknik_analiz + analiz + analist + rakip) ────────────
+    '/api/v1/teknik_analiz': {
+        'sembol': '', 'fiyat': 0.0, 'degisim': 0.0,
+        'skor': 50, 'aksiyon': 'NOTR', 'trend': 'Yatay',
+        'trend_guc': 50, 'fiyat_gucu': 50,
+        'volatilite': 0.0, 'hacim_oran': 1.0,
+        'indikatorler': {
+            'ema': {'7': 0.0, '21': 0.0, '50': 0.0, '100': 0.0, '200': 0.0},
+            'rsi': {'deger': 50.0, 'durum': 'Nötr'},
+            'macd': {'deger': 0.0, 'sinyal': 0.0, 'hist': 0.0, 'durum': 'Nötr', 'cross': 'Yok'},
+            'bollinger': {'ust': 0.0, 'orta': 0.0, 'alt': 0.0, 'durum': 'Orta', 'genislik': 0.0},
+            'stochastic': {'k': 50.0, 'd': 50.0, 'durum': 'Nötr'},
+            'atr': 0.0,
+        },
+        'ema_mesafe': {'7': 0.0, '21': 0.0, '50': 0.0, '100': 0.0, '200': 0.0},
+        'destek_direnc': {
+            'pivot': 0.0,
+            'r1': 0.0, 'r2': 0.0, 'r3': 0.0,
+            's1': 0.0, 's2': 0.0, 's3': 0.0,
+        },
+        'sinyaller': [],
+        'uyarilar': [],
+        'firsatlar': [],
+    },
+    '/api/v1/analiz': {
+        'sembol': '', 'aciklama': '', 'logo': '',
+        'fiyat': 0.0, 'degisim': 0.0, 'hacim': 0.0, 'tarih': '',
+        'analiz': {
+            'hareket': None, 'risk': '', 'hacim': 0, 'upwards': None,
+            'ozel': {'yon': None, 'sinyal': None, 'aciklama': None},
+            '7_degisim': None, '30_degisim': None,
+            'stop': None, 'puan': 0.0, 'pivot': '', 'pivot_zaman': '',
+            'trend': '', 'gunluk': '', 'sinyal': '', 'yorum': '',
+            'tahmin': {'yorum': '', 'tarih': '', 'fiyat': ''},
+            'direncler': {'fibonacci': [], 'hacim': []},
+            'sinyaller': [],
+            'tahminler': {
+                'uc_ay':  {'fiyat': '', 'oran': ''},
+                'bi_sene': {'fiyat': '', 'oran': ''},
+            },
+        },
+        'temel_analiz': {
+            'Hisse Bilgi': '', 'Hisse': '', 'Hisse Fiyatı': 0.0,
+            'Ödenmiş Sermaye': 0.0, '3 Aylık Net Kâr': 0.0,
+            'Hisse F/K Oranı': 0.0, 'Hisse PD/DD Oranı': 0.0,
+            'Sektör Bilgi': '', 'Sektör': '',
+            'Sektör F/K Oranı': 0.0, 'Sektör PD/DD Oranı': 0.0,
+            'Tahminler': '', 'Yıl Sonu Tahmini Net Kâr': 0.0,
+            'Özsermaye': 0.0, 'Güncel Piyasa Değeri': 0.0,
+            'Olması Gereken Fiyat': '',
+            '1) Sektör F/K Oranına Göre': 0,
+            '2) Endeks F/K Oranına Göre': 0,
+            '3) Sektör Future\'s F/K Oranına Göre': 0.0,
+            '4) Endeks Future\'s F/K Oranına Göre': 0.0,
+            '5) Sektör PD/DD Oranına Göre': 0.0,
+            '6) Endeks PD/DD Oranına Göre': 0.0,
+            '7) Ödenmiş Sermayeye Göre': 0.0,
+            '8) Potansiyel Piyasa Değerine Göre': 0.0,
+            '9) Yıl Sonu Tahmini Özsermaye Kârlılığına Göre': 0.0,
+            'Değerleme': '',
+            'Hissenin Sektöre Göre Olması Gereken Fiyatı (₺)': 0.0,
+            'Hissenin Endekse Göre Olması Gereken Fiyatı (₺)': 0.0,
+            'Hissenin Değerleme Fiyatı (₺)': 0.0,
+            'Hissenin Prim Potansiyeli (%)': 0.0,
+            'Hissenin Bedelsiz Potansiyeli (%)': 0.0,
+        },
+        'finansallar': {'destek': None, 'tahmin': None, 'hedef': None},
+        'karne': dict(_MOCK_KARNE),
+    },
+    '/api/v1/analist': {
+        'sembol': '', 'veriler': [],
+        'piyasa_son': [],
+    },
+    '/api/v1/rakip': {
+        'sembol': '',
+        'rakip_analizi': {
+            'code': {'$eq': ''},
+            'initial': {'user': '', 'favorites': ''},
+            'company': dict(_MOCK_COMPANY),
+            'sectors': [],
+            'ratio_types': [],
+            'data': [],
+            'ratios': [],
+            'average': [],
+        },
+    },
+
+    # ── Şirket sekmesi ────────────────────────────────────────────────────────
+    '/api/v1/sirket': {
+        'sembol': '', 'aciklama': '', 'logo': '',
+        'sirket': dict(_MOCK_COMPANY),
+    },
+    '/api/v1/sirket_bilgileri': {
+        'sembol': '', 'aciklama': '', 'logo': '',
+        'bilgiler': {
+            'islem_gorulen_pazar': {'title': 'Sermaye Piyasası Aracının İşlem Gördüğü Pazar', 'value': ''},
+            'bagimsiz_denetim_kurulusu': {'title': 'Bağımsız Denetim Kuruluşu', 'value': ''},
+            'bagli_ortakliklar': {'title': 'Bağlı Ortaklıklar', 'value': []},
+            'dogrudan_oy_hakkina_sahip_kisiler': {'title': 'Sermayede Doğrudan %5 veya Daha Fazla Paya veya Oy Hakkına Sahip Gerçek ve Tüzel Kişiler', 'value': []},
+            'dolayli_yoldan_oy_hakkina_sahip_kisiler': {'title': 'Son Durum İtibariyle Sermayeye Dolaylı Yoldan Sahip Olan Gerçek ve Tüzel Kişiler', 'value': []},
+        },
+        'katilim': {'endekste': False, 'gelir_orani': 0.0, 'varlik_orani': 0.0, 'borc_orani': 0.0},
+    },
+    '/api/v1/aracilar':         {'ok': True, 'aracilar': []},
+    '/api/v1/endeks_agirliklari': {
+        'sembol': '', 'dahil_sayisi': 0,
+        'endeksler': {},
+    },
+
+    # ── AVWAP sekmesi ─────────────────────────────────────────────────────────
+    '/api/v1/avwap': {
+        'sembol': '', 'aciklama': '', 'logo': '',
+        'ticker': '', 'gen_date': '', 'price': 0.0,
+        'dist': '0%', 'vol_ratio': 1.0,
+        'confluence_status': '', 'rating': 'NOTR',
+        'rating_color': 'gray', 'score': 0, 'raw_score': 0,
+        'reasons': [], 'free_float': '0%', 'chart_image': '',
+        'top_buyers': [], 'top_sellers': [],
+        'takas_artanlar': [], 'takas_azalanlar': [],
+        'sifirdan_giris': {'sayi': 0, 'toplam': 0, 'yuzde': 0, 'yorum': None},
+        'takas_dates': {
+            'akd_start': '', 'akd_end': '',
+            'takas_start': '', 'takas_end': '',
+        },
+        'akd_dates': {'akd_start': '', 'akd_end': ''},
+        'avwaps': [],
+        'avwap_yorum': {'yorumlar': [], 'sonuc': '', 'renk': ''},
+        'price_changes': [],
+        'ema_list': [],
+        'ema_score': 0, 'ema_above_count': 0,
+        'rsi': {
+            'value': 50.0, 'status': 'Nötr',
+            'divergence': {'type': '', 'desc': '', 'reliability': 0},
+            'desc': '', 'trade_signal': None,
+        },
+        'smart_analysis': {
+            'akd_yorum': {'buyers': [], 'sellers': [], 'concentration': 0, 'verdict': ''},
+            'takas_yorum': {'comments': [], 'weak_exits': 0, 'foreign_entry': False, 'verdict': ''},
+            'cross_analysis': {'insights': [], 'buy_power': 0, 'sell_power': 0},
+            'virman_suspects': [], 'bank_virman': [],
+            'aggressive_buyer_signal': None,
+            'sifirdan_giris_analizi': {
+                'kurumlar': [], 'toplam_artan': 0,
+                'sifirdan_sayi': 0, 'yuzde': 0, 'yorum': None,
+            },
+            'overall_score': 0, 'overall_verdict': '',
+            'smart_money_signal': None, 'key_insights': [],
+        },
+    },
+
+    # ── OHLCV ve PGC (grafik) ─────────────────────────────────────────────────
+    '/api/v1/ohlcv': {
+        'sembol': '',
+        'ohlcv': {
+            's': 'ok',
+            'realtime_price': False,
+            'realtime_volume': False,
+            't': [], 'o': [], 'h': [], 'l': [], 'c': [], 'v': [],
+        },
+    },
+    '/api/v1/pgc': {
+        'monthly': [], 'weekly': [],
+        'yields': dict(_MOCK_YIELDS),
+    },
+    '/api/v1/yield': {
+        'sembol': '',
+        'yields': dict(_MOCK_YIELDS),
+    },
+
+    # ── Finansallar sekme alt sekmeleri ───────────────────────────────────────
+    '/api/v1/bilanco': {
+        'sembol': '',
+        'bilanco': dict(_MOCK_FINANSAL_INNER),
+    },
+    '/api/v1/gelir_tablosu': {
+        'sembol': '',
+        'gelir_tablosu': dict(_MOCK_FINANSAL_INNER),
+    },
+    '/api/v1/nakit_akim': {
+        'sembol': '',
+        'nakit_akim': dict(_MOCK_FINANSAL_INNER),
+    },
+    '/api/v1/rasyo_grafik':  {'sembol': '', 'grafikler': []},
+    '/api/v1/temettu': {
+        'sembol': '', 'aciklama': '', 'logo': '',
+        'fiyat': 0.0, 'degisim': 0.0,
+        'veriler': {'dividends': []},
+    },
+    '/api/v1/geri_alimlar': {
+        'sembol': '', 'veriler': [],
+    },
+
+    # ── Derinlik / Canlı sekmesi ──────────────────────────────────────────────
+    '/api/v1/derinlik': {
+        'sembol': '', 'fiyat': 0.0, 'degisim': 0.0,
+        'derinlik': {
+            'depth': {'bids': [], 'asks': []},
+            'depthstats': {
+                'totalBidQuantity': 0, 'totalAskQuantity': 0,
+                'totalBidWAvg': 0.0, 'totalAskWAvg': 0.0,
+            },
+        },
+        'emirler': [],
+        'mini_akd': {'alanlar': [], 'satanlar': [], 'toplamlar': []},
+    },
+
+    # ── Piyasa genel ──────────────────────────────────────────────────────────
+    '/api/v1/piyasa': {
+        'piyasa': [],
+        'toplam': 0,
+        'siralama': 'yukselenler',
+    },
+    '/api/v1/piyasa_ozeti': {
+        'endeksler': [], 'yukselenler': [], 'dusenler': [],
+        'en_hacimli': [], 'hacim_liderleri': [],
+        'tarih': '', 'toplam_hisse': 0,
+        'yukselen_sayi': 0, 'dusen_sayi': 0, 'degismez_sayi': 0,
+    },
+    '/api/v1/endeksler': {'endeksler': []},
+    '/api/v1/karsilastir': {'semboller': [], 'metrikler': []},
+
+    # ── Takas ve AKD ──────────────────────────────────────────────────────────
+    '/api/v1/akd': {
+        'sembol': '', 'fiyat': 0.0, 'degisim': 0.0,
+        'ilk': '', 'son': '', 'dolasim': 0,
+        'akd': {'alanlar': [], 'satanlar': [], 'toplamlar': []},
+        'net_pozisyonlar': [],
+    },
+    '/api/v1/takas': {
+        'sembol': '', 'fiyat': 0.0, 'degisim': 0.0,
+        'ilk': '', 'son': '', 'dolasim': 0,
+        'takas': [],
+        'tl_saklama': {'mod': 'diff', 'veriler': []},
+    },
+    '/api/v1/realtakas': {
+        'sembol': '', 'fiyat': 0.0, 'degisim': 0.0,
+        'ilk': '', 'son': '', 'dolasim': 0,
+        'takas': [],
+        'tl_saklama': {'mod': 'diff', 'veriler': []},
+        'akd': {'ilk': '', 'son': '', 'alanlar': [], 'satanlar': [], 'toplamlar': []},
+        'capraz': [],
+    },
+    '/api/v1/takasrapor': {'ok': True, 'sembol': '', 'takas': [], 'capraz': []},
+    '/api/v1/zincir': {
+        'ok': True, 'sembol': '', 'price': 0.0, 'timestamp': '',
+        'ladder': {
+            'support': 0.0, 'resistance': 0.0,
+            'dist_support': 0.0, 'dist_resistance': 0.0,
+            'next_target': 0.0, 'position_pct': 0.0,
+            'chain_str': '',
+            'analysis': {
+                'konum': '', 'destek': '', 'direnc': '',
+                'strateji_al': '', 'strateji_stop': '',
+            },
+        },
+        'akd': {
+            'net': 0, 'emoji': '', 'status': '',
+            'top5_buyers': [], 'top5_sellers': [],
+        },
+    },
+
+    # ── AKD piyasa geneli ─────────────────────────────────────────────────────
+    '/api/v1/piyasa_akd': {'ilk': '', 'son': '', 'kurumlar': []},
+    '/api/v1/kurum_akd':  {
+        'kurum': '', 'kurum_ad': '',
+        'ilk': '', 'son': '', 'hisse_sayisi': 0,
+        'veriler': [], 'grafik': [],
+    },
+    '/api/v1/analiztakas': {
+        'sembol': '', 'aciklama': '', 'logo': '',
+        'fiyat': 0.0, 'degisim': 0.0, 'hacim': 0.0, 'tarih': '',
+        'analiz': {
+            'hareket': None, 'risk': '', 'hacim': 0, 'upwards': None,
+            'ozel': {'yon': None, 'sinyal': None, 'aciklama': None},
+            '7_degisim': None, '30_degisim': None,
+            'stop': None, 'puan': 0.0, 'pivot': '', 'pivot_zaman': '',
+            'trend': '', 'gunluk': '', 'sinyal': '', 'yorum': '',
+            'tahmin': {'yorum': '', 'tarih': '', 'fiyat': ''},
+            'direncler': {'fibonacci': [], 'hacim': []},
+            'sinyaller': [],
+            'tahminler': {
+                'uc_ay':  {'fiyat': '', 'oran': ''},
+                'bi_sene': {'fiyat': '', 'oran': ''},
+            },
+        },
+        'temel_analiz': {},
+        'finansallar': {'destek': None, 'tahmin': None, 'hedef': None},
+        'karne': dict(_MOCK_KARNE),
+    },
+
+    # ── KAP pay bildirimleri ──────────────────────────────────────────────────
+    '/api/v1/pay_alim_satim':     {'sembol': '', 'from_date': '', 'to_date': '', 'veriler': []},
+    '/api/v1/tum_pay_alim_satim': {'veriler': []},
+
+    # ── Akış ve sosyal ────────────────────────────────────────────────────────
+    '/api/v1/akis': {
+        'sembol': '',
+        'veriler': [],
+    },
+    '/api/v1/twitter': {'sembol': '', 'veriler': []},
 }
 
 
@@ -685,21 +1201,33 @@ def _bulk_base_headers():
 
 def _http_get(url, headers, timeout=15):
     try:
-        r = requests.get(url, headers=headers, timeout=timeout)
+        r = _HTTP_SESSION.get(url, headers=headers, timeout=timeout)
         return r.content
     except Exception:
         return None
 
 
 def _parallel_get(urls_by_key, headers, timeout=15, max_workers=8):
+    """Fetch multiple URLs in parallel using the shared executor."""
+    if not urls_by_key:
+        return {}
     out = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_http_get, url, headers, timeout): key for key, url in urls_by_key.items()}
-        for fut in futures:
+    futures = {
+        _SHARED_EXECUTOR.submit(_http_get, url, headers, timeout): key
+        for key, url in urls_by_key.items()
+    }
+    try:
+        for fut in as_completed(futures, timeout=timeout + 10):
             key = futures[fut]
             try:
                 out[key] = fut.result()
             except Exception:
+                out[key] = None
+    except Exception:
+        # Collect whatever completed so far; fill rest with None
+        completed_keys = set(out.keys())
+        for fut, key in futures.items():
+            if key not in completed_keys:
                 out[key] = None
     return out
 
@@ -1038,7 +1566,6 @@ def _akd_process_symbol(sym, data, mini_grafik):
     tl_konsant_skor = tl_konsant * 0.15
     alici_yogun_skor = min(10, max(0, (8 - min(alan_sayi, 8)) * 1.5)) if alan_sayi > 0 else 0
     satici_daginik_skor = min(10, (satan_sayi / max(1, alan_sayi)) * 4) if satan_sayi > 0 else 0
-    import math
     lot_skor = min(10, math.log10(max(10, total_buy_w)) * 1.6)
     skor = round(min(100, max(0,
         top3_skor + top5_skor + tl_konsant_skor
@@ -1505,6 +2032,182 @@ def akd_bulk():
     return _json_response({"ok": True, "sonuclar": combined})
 
 
+@app.route("/api/v1/fiyat_bulk", methods=["POST"])
+def fiyat_bulk():
+    """Parallel price fetch for multiple symbols via fiyatlar endpoint."""
+    try:
+        payload = json.loads(request.get_data(as_text=True) or "null") or {}
+    except Exception:
+        payload = {}
+    semboller = payload.get("semboller") or []
+    if not isinstance(semboller, list) or not semboller:
+        return _json_response({"ok": True, "fiyatlar": {}})
+    clean = [_clean_symbol(s) for s in semboller]
+    clean = [s for s in clean if s]
+    if not clean:
+        return _json_response({"ok": True, "fiyatlar": {}})
+    headers = _bulk_base_headers()
+    CHUNK = 50
+    fiyatlar = {}
+    for i in range(0, len(clean), CHUNK):
+        chunk = clean[i:i + CHUNK]
+        url = f"{BASE_URL}/api/v1/fiyatlar?semboller={','.join(quote(s) for s in chunk)}"
+        raw = _http_get(url, headers, timeout=20)
+        if raw:
+            try:
+                d = json.loads(raw)
+                f = d.get("fiyatlar") if isinstance(d, dict) else None
+                if isinstance(f, dict):
+                    fiyatlar.update(f)
+            except Exception:
+                pass
+    return _json_response({"ok": True, "fiyatlar": fiyatlar})
+
+
+@app.route("/api/v1/sirala_populate", methods=["POST"])
+def sirala_populate():
+    """Populate screener cache by running bulk upstream analysis for given symbols."""
+    try:
+        payload = json.loads(request.get_data(as_text=True) or "null") or {}
+    except Exception:
+        payload = {}
+    mode = sirala_normalize_mode(payload.get("mode", "teknik"))
+    if not mode:
+        mode = "teknik"
+    semboller = payload.get("semboller") or []
+    if not isinstance(semboller, list):
+        semboller = []
+    if not semboller:
+        semboller = list(MOCK_SEMBOLLER)[:150]
+    clean = [_clean_symbol(s) for s in semboller if _clean_symbol(s)]
+    if not clean:
+        return _json_response({"ok": False, "reason": "no_symbols"})
+    headers = _bulk_base_headers()
+    today = datetime.now()
+    son = today.strftime("%Y-%m-%d")
+    ilk = (today - timedelta(days=92)).strftime("%Y-%m-%d")
+
+    if mode in ("teknik", "birleshik"):
+        teknik_urls = {sym: f"{BASE_URL}/api/v1/teknik_analiz?sembol={quote(sym)}" for sym in clean}
+        ohlcv_urls  = {sym: f"{BASE_URL}/api/v1/ohlcv?sembol={quote(sym)}&resolution=D&countback=90" for sym in clean}
+        teknik_raw  = _parallel_get(teknik_urls, headers, timeout=20, max_workers=12)
+        ohlcv_raw   = _parallel_get(ohlcv_urls, headers, timeout=15, max_workers=12)
+        rows = []
+        for sym, raw_t in teknik_raw.items():
+            try:
+                d = json.loads(raw_t) if raw_t else None
+            except Exception:
+                d = None
+            if not d or not isinstance(d.get("skor"), (int, float)):
+                continue
+            mini_grafik = []
+            raw_o = ohlcv_raw.get(sym)
+            if raw_o:
+                try:
+                    ohlcv = json.loads(raw_o)
+                    for c in ((ohlcv or {}).get("ohlcv") or {}).get("c") or []:
+                        if isinstance(c, (int, float)) and float(c) > 0:
+                            mini_grafik.append(round(float(c), 4))
+                except Exception:
+                    pass
+            if not mini_grafik and isinstance(d.get("fiyat"), (int, float)) and float(d["fiyat"]) > 0:
+                mini_grafik.append(round(float(d["fiyat"]), 4))
+            rows.append({
+                "sembol": sym, "skor": int(d["skor"]),
+                "aksiyon": d.get("aksiyon", ""),
+                "fiyat": _to_float(d.get("fiyat", 0)),
+                "degisim": _to_float(d.get("degisim", 0)),
+                "mini_grafik": mini_grafik,
+            })
+        if mode == "birleshik":
+            analiz_urls = {sym: f"{BASE_URL}/api/v1/analiz?sembol={quote(sym)}" for sym in clean}
+            analiz_raw  = _parallel_get(analiz_urls, headers, timeout=20, max_workers=12)
+            analiz_map = {}
+            for sym, raw_a in analiz_raw.items():
+                try:
+                    d2 = json.loads(raw_a) if raw_a else None
+                except Exception:
+                    d2 = None
+                if d2 and isinstance(d2.get("analiz"), dict):
+                    analiz_map[sym] = _to_float(d2["analiz"].get("puan", 0))
+            for r in rows:
+                ap = analiz_map.get(r["sembol"], 0)
+                r["analizPuan"] = ap
+                r["teknikSkor"] = r["skor"]
+                r["skor"] = round((r["skor"] + ap) / 2, 2)
+        if rows:
+            sirala_write_cache_payload(mode, rows)
+        return _json_response({"ok": True, "mode": mode, "count": len(rows)})
+
+    elif mode == "analiz":
+        analiz_urls = {sym: f"{BASE_URL}/api/v1/analiz?sembol={quote(sym)}" for sym in clean}
+        analiz_raw  = _parallel_get(analiz_urls, headers, timeout=20, max_workers=12)
+        rows = []
+        for sym, raw_a in analiz_raw.items():
+            try:
+                d = json.loads(raw_a) if raw_a else None
+            except Exception:
+                d = None
+            if not d or not isinstance(d.get("analiz"), dict):
+                continue
+            a = d["analiz"]
+            puan = _to_float(a.get("puan", 0))
+            rows.append({
+                "sembol": sym, "skor": puan,
+                "aksiyon": a.get("sinyal", a.get("hareket", "")),
+                "fiyat": _to_float(d.get("fiyat", 0)),
+                "degisim": _to_float(d.get("degisim", 0)),
+                "analizPuan": puan,
+            })
+        if rows:
+            sirala_write_cache_payload(mode, rows)
+        return _json_response({"ok": True, "mode": mode, "count": len(rows)})
+
+    elif mode == "diptakas":
+        takas_urls = {
+            sym: f"{BASE_URL}/api/v1/realtakas?sembol={quote(sym)}&ilk={ilk}&son={son}"
+            for sym in clean
+        }
+        ohlcv_urls = {sym: f"{BASE_URL}/api/v1/ohlcv?sembol={quote(sym)}&resolution=D&countback=90" for sym in clean}
+        takas_raw = _parallel_get(takas_urls, headers, timeout=30, max_workers=10)
+        ohlcv_raw = _parallel_get(ohlcv_urls, headers, timeout=15, max_workers=10)
+        rows = []
+        for sym, raw in takas_raw.items():
+            try:
+                d = json.loads(raw) if raw else None
+            except Exception:
+                d = None
+            if not d:
+                continue
+            mini_grafik = []
+            raw_o = ohlcv_raw.get(sym)
+            if raw_o:
+                try:
+                    ohlcv = json.loads(raw_o)
+                    for c in ((ohlcv or {}).get("ohlcv") or {}).get("c") or []:
+                        if isinstance(c, (int, float)) and float(c) > 0:
+                            mini_grafik.append(round(float(c), 4))
+                except Exception:
+                    pass
+            try:
+                res = _akd_process_symbol(sym, d, mini_grafik)
+                if res:
+                    rows.append(res)
+            except Exception:
+                pass
+        akd_merge_cache_results(rows, [r["sembol"] for r in rows])
+        now_pop = time.time()
+        for r in rows:
+            sk = r.get("sembol")
+            if sk:
+                _AKD_BULK_MEM_CACHE[sk] = (now_pop, r)
+        if rows:
+            sirala_write_cache_payload(mode, rows)
+        return _json_response({"ok": True, "mode": mode, "count": len(rows)})
+
+    return _json_response({"ok": False, "reason": "unsupported_mode"})
+
+
 # ─────────────────────────── /cdn-cgi/* stub ───────────────────────────
 
 @app.route("/cdn-cgi/<path:_subpath>", methods=["GET", "POST"])
@@ -1612,6 +2315,18 @@ def _serve_tma_root():
     html = SCRIPT_TAG_RE.sub(lambda m: inject_block + "\n" + m.group(1), html, count=1)
 
     return Response(html, status=200, mimetype="text/html; charset=utf-8")
+
+
+def _unlock_allowed(obj):
+    """Recursively set all 'allowed' fields to True in a response dict/list."""
+    if isinstance(obj, dict):
+        if "allowed" in obj and obj["allowed"] is False:
+            obj["allowed"] = True
+        for v in obj.values():
+            _unlock_allowed(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            _unlock_allowed(item)
 
 
 def _serve_proxy_passthrough(path):
@@ -1740,6 +2455,25 @@ def _serve_proxy_passthrough(path):
                 data["limitler"] = dict(ALARM_LIMITLER)
             return _json_response(data)
 
+    # Unlock all ratio_types / allowed=false fields for premium endpoints
+    _RATIO_UNLOCK_PATHS = (
+        "/api/v1/ozet", "/api/v1/bilanco", "/api/v1/rakip",
+        "/api/v1/analiz", "/api/v1/sirket", "/api/v1/sirket_bilgileri",
+        "/api/v1/gelir_tablosu", "/api/v1/nakit_akim",
+        "/api/v1/analiztakas", "/api/v1/geri_alimlar",
+        "/api/v1/rasyo_grafik", "/api/v1/pgc",
+        "/api/v1/pay_alim_satim", "/api/v1/tum_pay_alim_satim",
+        "/api/v1/analist",
+    )
+    if any(path_base.startswith(p) for p in _RATIO_UNLOCK_PATHS):
+        try:
+            data = json.loads(result["respBody"].decode("utf-8", errors="replace"))
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            _unlock_allowed(data)
+            return _json_response(data)
+
     # Default passthrough
     skip_headers = {
         "transfer-encoding", "content-encoding", "content-length",
@@ -1795,6 +2529,70 @@ def catch_all(path):
         return _serve_tma_root()
 
     return _serve_proxy_passthrough(full_path)
+
+
+@app.route("/api/v1/piyasa_movers", methods=["GET"])
+def piyasa_movers():
+    """Return full yukselenler/dusenler by fetching all symbol prices in parallel batches."""
+    headers = _bulk_base_headers()
+    clean = [_clean_symbol(s) for s in MOCK_SEMBOLLER if _clean_symbol(s)]
+    if not clean:
+        return _json_response({"ok": False, "yukselenler": [], "dusenler": []})
+    CHUNK = 100
+    chunks = [clean[i:i + CHUNK] for i in range(0, len(clean), CHUNK)]
+    urls_by_key = {
+        f"c{i}": f"{BASE_URL}/api/v1/fiyatlar?semboller={','.join(quote(s) for s in chunk)}"
+        for i, chunk in enumerate(chunks)
+    }
+    raw_results = _parallel_get(urls_by_key, headers, timeout=20, max_workers=10)
+    fiyatlar = {}
+    for raw in raw_results.values():
+        if not raw:
+            continue
+        try:
+            d = json.loads(raw)
+            f = d.get("fiyatlar") if isinstance(d, dict) else None
+            if isinstance(f, dict):
+                fiyatlar.update(f)
+        except Exception:
+            pass
+    yukselenler, dusenler = [], []
+    for sym, f in fiyatlar.items():
+        if not isinstance(f, dict):
+            continue
+        chg = f.get("degisim")
+        if chg is None:
+            continue
+        entry = {
+            "sembol": sym,
+            "fiyat": f.get("fiyat"),
+            "degisim": chg,
+            "hacim": f.get("hacim"),
+        }
+        if chg > 0:
+            yukselenler.append(entry)
+        elif chg < 0:
+            dusenler.append(entry)
+    yukselenler.sort(key=lambda x: -(x.get("degisim") or 0))
+    dusenler.sort(key=lambda x:  (x.get("degisim") or 0))
+    tum = yukselenler + dusenler + [
+        {"sembol": s, "fiyat": f.get("fiyat"), "degisim": f.get("degisim", 0), "hacim": f.get("hacim")}
+        for s, f in fiyatlar.items()
+        if isinstance(f, dict) and (f.get("degisim") or 0) == 0
+    ]
+    hacim_liderleri = sorted(
+        [r for r in tum if r.get("hacim")],
+        key=lambda x: -(x.get("hacim") or 0)
+    )
+    return _json_response({
+        "ok": True,
+        "yukselenler": yukselenler,
+        "dusenler": dusenler,
+        "hacim_liderleri": hacim_liderleri,
+        "yukselen_sayi": len(yukselenler),
+        "dusen_sayi": len(dusenler),
+        "toplam_hisse": len(fiyatlar),
+    })
 
 
 if __name__ == "__main__":
